@@ -239,6 +239,18 @@ static uint32_t linux_fs_magic(const char *type) {
         if (!strcmp(type, table[i].name)) return table[i].magic;
     return 0;
 }
+#ifdef __linux__
+#include <sys/statfs.h>
+#define MNT_RDONLY 1
+#define MNT_NOSUID 2
+#define MNT_NODEV 4
+#define MNT_NOEXEC 8
+#define MNT_SYNCHRONOUS 16
+#define MNT_NOATIME 1024
+#define RT_FSID(s) ((s)->f_fsid.__val)
+#else
+#define RT_FSID(s) ((s)->f_fsid.val)
+#endif
 static uint32_t linux_mount_flags(uint32_t flags) {
     uint32_t result = 0;
     if (flags & MNT_RDONLY) result |= 1;
@@ -249,6 +261,11 @@ static uint32_t linux_mount_flags(uint32_t flags) {
     if (flags & MNT_NOATIME) result |= 1024;
     return result;
 }
+#ifdef __linux__
+#define RT_STATFS_MAGIC(s) ((uint32_t)(s)->f_type)
+#else
+#define RT_STATFS_MAGIC(s) linux_fs_magic((s)->f_fstypename)
+#endif
 // Disposition glibc i386 : bits/statfs.h et bits/statvfs.h.
 static int write_statfs(CPU *c, uint32_t address, const struct statfs *s, int vfs, int wide) {
     uint64_t counts[] = {s->f_blocks, s->f_bfree, s->f_bavail, s->f_files, s->f_ffree, s->f_ffree};
@@ -257,25 +274,31 @@ static int write_statfs(CPU *c, uint32_t address, const struct statfs *s, int vf
     memset(rt_write_span(c, address, size), 0, size);
     uint32_t bsize = s->f_bsize;
     if (vfs) { W32(at, bsize); W32(at + 4, bsize); at += 8; }
-    else { W32(at, linux_fs_magic(s->f_fstypename)); W32(at + 4, bsize); at += 8; }
+    else { W32(at, (RT_STATFS_MAGIC(s))); W32(at + 4, bsize); at += 8; }
     for (unsigned i = 0; i < (vfs ? 6u : 5u); ++i) {
         if (wide) { W64(at, counts[i]); at += 8; } else { W32(at, (uint32_t)counts[i]); at += 4; }
     }
     if (vfs) {
-        W32(at, (uint32_t)s->f_fsid.val[0]); W32(at + 4, 0);
+        W32(at, (uint32_t)RT_FSID(s)[0]); W32(at + 4, 0);
         W32(at + 8, linux_mount_flags(s->f_flags)); W32(at + 12, 255);
     } else {
-        W32(at, (uint32_t)s->f_fsid.val[0]); W32(at + 4, (uint32_t)s->f_fsid.val[1]);
+        W32(at, (uint32_t)RT_FSID(s)[0]); W32(at + 4, (uint32_t)RT_FSID(s)[1]);
         W32(at + 8, 255); W32(at + 12, bsize); W32(at + 16, linux_mount_flags(s->f_flags) | 0x20); // ST_VALID
     }
     return 0;
 }
 
+#ifdef __PROSPERO__
+void rt_ps5_mark_nonblocking(int fd, int enable);
+#endif
 static int linux_ioctl(CPU *c, int fd, uint32_t request, uint32_t value) {
     switch (request) {
     case 0x5421: { // FIONBIO
         rt_span(c, value, 4);
         int enable = (int32_t)R32(value);
+#ifdef __PROSPERO__
+        rt_ps5_mark_nonblocking(fd, enable != 0);
+#endif
         return ioctl(fd, FIONBIO, &enable);
     }
     case 0x541b: { // FIONREAD
@@ -317,7 +340,16 @@ static int posix_shim(CPU *c, const char *name) {
     if (!strcmp(name, "mkdir")) {
         const char *path = string(c, arg(c, 0));
         char relative[PATH_MAX]; int inside = rt_path_relative(path, relative);
-        int result = inside < 0 || create_target(path, a) ? -1 : mkdir(a, (mode_t)arg(c, 1));
+        mode_t mode = (mode_t)arg(c, 1);
+#ifdef __PROSPERO__
+        // The game makes its save folders 0744: on the console the FTP server and the shell run as other users and could not look
+        // inside (saves showed as empty, unreadable files). Open to all, as the rest of /data/portal2 is.
+        mode = 0777;
+#endif
+        int result = inside < 0 || create_target(path, a) ? -1 : mkdir(a, mode);
+#ifdef __PROSPERO__
+        if (!result) chmod(a, 0777);   // past the process umask
+#endif
         if (!result && inside > 0 && *relative) rt_path_clear_whiteout(relative);
         finish(c, result);
     } else if (!strcmp(name, "rmdir")) {
@@ -518,6 +550,9 @@ static int posix_shim(CPU *c, const char *name) {
             native &= ~(O_APPEND | O_NONBLOCK);
             if (value & 0x400) native |= O_APPEND;
             if (value & 0x800) native |= O_NONBLOCK;
+#ifdef __PROSPERO__
+            rt_ps5_mark_nonblocking(fd, (value & 0x800) != 0);
+#endif
             finish(c, fcntl(fd, F_SETFL, native));
         } else if ((command >= 5 && command <= 7) || (command >= 12 && command <= 14)) {
             // Verrous POSIX. struct flock i386 : l_type@0 et l_whence@2 (short), l_start@4,

@@ -74,9 +74,17 @@ static int join(CPU *c, GTm *t, int utc, int32_t *result) {
 static uint32_t timezone_address, daylight_address;
 static void refresh_zone(void) {
     tzset();
+#ifdef __PROSPERO__
+    // FreeBSD has no `timezone`/`daylight` variables: derive them from localtime.
+    time_t now = time(NULL); struct tm local; localtime_r(&now, &local);
+    long zone = -local.tm_gmtoff + (local.tm_isdst > 0 ? 3600 : 0); int dst = local.tm_isdst > 0;
+    if (timezone_address) W32(timezone_address, (uint32_t)(int32_t)zone);
+    if (daylight_address) W32(daylight_address, (uint32_t)dst);
+#else
     extern long timezone; extern int daylight;
     if (timezone_address) W32(timezone_address, (uint32_t)(int32_t)timezone);
     if (daylight_address) W32(daylight_address, (uint32_t)daylight);
+#endif
 }
 int rt_time_data_import(const char *name, uint32_t address) {
     if (!strcmp(name, "timezone")) timezone_address = address;

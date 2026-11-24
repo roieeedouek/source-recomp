@@ -159,7 +159,7 @@ int rt_thread_shim(CPU *c,const char *name) {
         // d'un autre thread ne sert qu'aux outils de débogage et n'est pas appliqué.
         uint32_t length=rt_string_length(c,rt_arg32(c,1));
         if(length>15){c->eax=RT_ERANGE;return 1;}
-        if(address==rt_thread_pointer(c))pthread_setname_np((const char *)GPTR(rt_arg32(c,1)));
+        if(address==rt_thread_pointer(c))pthread_setname_np_1((const char *)GPTR(rt_arg32(c,1)));
         c->eax=0;
     } else if(!strcmp(name,"pthread_setaffinity_np")) {
         // Darwin has no CPU pinning on Apple silicon. The mask is validated as

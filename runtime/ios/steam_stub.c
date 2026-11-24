@@ -10,7 +10,7 @@
 // sans réponse particulière sont générées (steam_stub_generated.c) et
 // renvoient 0, false, NULL ou "".
 #include <TargetConditionals.h>
-#if TARGET_OS_IPHONE
+#if TARGET_OS_IPHONE || defined(__linux__) || defined(__PROSPERO__)
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>

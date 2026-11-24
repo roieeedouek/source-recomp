@@ -17,6 +17,7 @@ Each game has its own folder (games.py app_name); Portal 2's is unchanged.
 """
 import json
 import os
+import sys
 from pathlib import Path
 
 import games
@@ -107,10 +108,25 @@ def host_prefix(config=None):
     return Path(config['host_prefix']).expanduser() if config.get('host_prefix') else HOMEBREW
 
 
-def host_flags(prefix=None):
+def host_flags(prefix=None, target='host'):
     """Compiler and linker flags for the host libraries under `prefix`. The
     rpath lets build/portal2-native find the bundle's @rpath libraries;
     tools/make_app.py replaces it with the app's Frameworks folder."""
+    if target == 'ps5':
+        # PS5 (Prospero, FreeBSD-derived): libraries from the pacbrew release unpacked in the payload SDK.
+        root = Path(__file__).resolve().parent.parent
+        home = Path(os.environ['PS5_PAYLOAD_SDK']) / 'target/user/homebrew'
+        return (['-std=gnu11', '-include', str(root / 'runtime/ps5/compat.h'), f'-I{root}/runtime/ps5',
+                 f'-I{home}/include', f'-I{home}/include/SDL2', f'-I{home}/include/freetype2', f'-I{home}/include/AL'],
+                [f'-L{root.parent}/deps/ps5-libs', f'-L{home}/lib', '-lSDL2', '-lopenal', '-lfontconfig', '-lfreetype', '-liconv',  '-lpng16', '-lexpat', '-lz', '-lbz2', '-lc++', '-lc++abi', '-lunwind', '-lm', '-Wl,--error-limit=0',
+                 '-lSceUserService', '-lScePad', '-lSceAudioOut', '-lSceKeyboard', '-lSceSysmodule', '-lSceSystemService',
+                 '-lSceVideoOut', '-lSceNet', '-lSceNetCtl', '-lSceImeDialog'])
+    if sys.platform.startswith('linux') and prefix is None:
+        # Linux x86-64 host: distro packages, Darwin glue from runtime/linux/ (an explicit prefix keeps the prefix layout).
+        root = Path(__file__).resolve().parent.parent
+        return (['-std=gnu11', '-include', str(root / 'runtime/linux/compat.h'), f'-I{root}/runtime/linux',
+                 '-I/usr/include/freetype2'],
+                ['-lSDL2', '-lfreetype', '-lfontconfig', '-lopenal', '-lGL', '-ldl', '-lpthread', '-lm', '-rdynamic'])
     prefix = host_prefix() if prefix is None else Path(prefix)
     cflags = [f'-I{prefix}/include', f'-I{prefix}/include/freetype2', '-DGL_SILENCE_DEPRECATION',
               '-DOPENAL_DEPRECATED=', '-DAL_SILENCE_DEPRECATION']

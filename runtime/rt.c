@@ -1,8 +1,12 @@
 #include "rt.h"
 #include "posix.h"
 #include <dlfcn.h>
-#include <mach/mach.h>
+#if defined(__linux__) || defined(__PROSPERO__)
+#include <stdio.h>
+#include <string.h>
+#else
 #include <mach/mach_vm.h>
+#endif
 #include <execinfo.h>
 #include <pthread.h>
 #include <signal.h>
@@ -91,8 +95,13 @@ static void install_fault_handlers(void) {
 int rt_init(void) {
     if (M) return -1;
     install_fault_handlers();
+#ifdef __PROSPERO__
+    void *p = rt_ps5_reserve((size_t)(address_space + guard_size));
+    if (!p) p = MAP_FAILED;
+#else
     void *p = mmap(NULL, (size_t)(address_space + guard_size), PROT_NONE,
                    MAP_PRIVATE | MAP_ANON, -1, 0);
+#endif
     if (p == MAP_FAILED) { perror("guest address space"); return -1; }
     M = p;
     // RT_RETURN_SENTINEL is the return address of every outermost guest
@@ -108,7 +117,9 @@ int rt_init(void) {
 void rt_destroy(void) {
     rt_shims_destroy();
     rt_native_destroy();
+#ifndef __PROSPERO__
     if (M) munmap(M, (size_t)(address_space + guard_size));
+#endif
     M = NULL;
 }
 
@@ -117,6 +128,9 @@ int rt_map(uint32_t addr, uint64_t size) {
     uint64_t page = rt_host_page_size();
     uint64_t lo = addr & ~(page - 1);
     uint64_t hi = ((uint64_t)addr + size + page - 1) & ~(page - 1);
+#ifdef __PROSPERO__
+    if (rt_ps5_commit((uint32_t)lo, hi - lo)) return -1;
+#endif
     return mprotect(M + lo, (size_t)(hi - lo), PROT_READ | PROT_WRITE);
 }
 
@@ -141,6 +155,16 @@ int rt_load_segment(const char *directory, const char *name, uint32_t offset,
 __attribute__((noreturn)) void rt_trap(CPU *c, uint32_t pc, const char *why) {
     fflush(NULL);
     fprintf(stderr, "guest trap at %#x (esp=%#x): %s\n", pc, c->esp, why);
+    // Return addresses are not recoverable without frame info: print the stack words that look like code addresses (the guest's
+    // images live in 0x10000000-0x40000000), for tools to symbolize against build/game/prep/layout.json.
+    fputs("  guest stack words:", stderr);
+    for (uint32_t i = 0, shown = 0; i < 4096 && shown < 48; ++i) {
+        uint32_t at = c->esp + i * 4;
+        if (at < 0x70000000u || at >= 0x70800000u) break;
+        uint32_t word = R32(at);
+        if (word >= 0x10000000u && word < 0x40000000u) { fprintf(stderr, " %#x", word); ++shown; }
+    }
+    fputc('\n', stderr);
     guest_backtrace();
     abort();
 }
@@ -290,6 +314,14 @@ static _Thread_local struct { uint32_t from_target, expected, actual; unsigned d
 // pour les diagnostics seulement.
 int rt_guest_readable(uint32_t address) {
     if (!M) return 0;
+#if defined(__linux__) || defined(__PROSPERO__)
+    // Linux/PS5: probe the page with mincore-free read of /proc/self/maps would be slow; use a pipe write probe.
+    static int probe[2] = {-1, -1};
+    if (probe[0] < 0 && pipe(probe)) return 0;
+    ssize_t n = write(probe[1], M + address, 1);   // EFAULT when unreadable
+    if (n == 1) { char drain; if (read(probe[0], &drain, 1) < 0) return 0; return 1; }
+    return 0;
+#else
     mach_vm_address_t region = (mach_vm_address_t)(uintptr_t)(M + address);
     mach_vm_size_t size = 0;
     vm_region_basic_info_data_64_t info;
@@ -299,6 +331,8 @@ int rt_guest_readable(uint32_t address) {
                                       (vm_region_info_t)&info, &count, &object);
     return kr == KERN_SUCCESS && region <= (mach_vm_address_t)(uintptr_t)(M + address) &&
            (info.protection & VM_PROT_READ);
+
+#endif
 }
 
 // Débogage : P2_WATCH_CALL=0x<adresse> affiche les 4 premiers arguments (et

@@ -40,14 +40,14 @@ static int host_address(CPU *c, uint32_t address, uint32_t length, struct sockad
     case L_AF_INET: {
         if (length < 16) return 22;
         struct sockaddr_in *v4 = (struct sockaddr_in *)out;
-        v4->sin_len = sizeof(*v4); v4->sin_family = AF_INET;
+        v4->sin_family = AF_INET;
         memcpy(&v4->sin_port, in + 2, 2); memcpy(&v4->sin_addr, in + 4, 4);
         *out_length = sizeof(*v4); return 0;
     }
     case L_AF_INET6: {
         if (length < 24) return 22;
         struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)out;
-        v6->sin6_len = sizeof(*v6); v6->sin6_family = AF_INET6;
+        v6->sin6_family = AF_INET6;
         memcpy(&v6->sin6_port, in + 2, 2); memcpy(&v6->sin6_flowinfo, in + 4, 4);
         memcpy(&v6->sin6_addr, in + 8, 16);
         if (length >= 28) memcpy(&v6->sin6_scope_id, in + 24, 4);
@@ -66,11 +66,10 @@ static int host_address(CPU *c, uint32_t address, uint32_t length, struct sockad
         used = strlen(host_path);
         if (used >= sizeof(un->sun_path)) return 36;
         un->sun_family = AF_UNIX; memcpy(un->sun_path, host_path, used);
-        un->sun_len = (uint8_t)(offsetof(struct sockaddr_un, sun_path) + used + 1);
-        *out_length = un->sun_len; return 0;
+        *out_length = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + used + 1); return 0;
     }
     case L_AF_UNSPEC:
-        out->ss_len = 2; out->ss_family = AF_UNSPEC; *out_length = 2; return 0;
+        out->ss_family = AF_UNSPEC; *out_length = 2; return 0;
     default: return 97; // EAFNOSUPPORT
     }
 }
@@ -115,6 +114,23 @@ static void guest_address(CPU *c, const struct sockaddr_storage *in, socklen_t i
     W32(length_address, size);
 }
 
+#ifdef __PROSPERO__
+// The console's sockets do not reliably keep the non-blocking mode the guest sets (FIONBIO, O_NONBLOCK): a recvfrom on the engine's
+// polled UDP socket blocked the main thread forever (title, 2026-11-24). The guest's intent is recorded per descriptor and each
+// send/receive on such a descriptor carries MSG_DONTWAIT.
+static _Atomic unsigned char nonblocking[4096];
+void rt_ps5_mark_nonblocking(int fd, int enable) {
+    if (fd < 0 || fd >= (int)sizeof nonblocking) return;
+    if (enable && !nonblocking[fd]) {
+        int f = fcntl(fd, F_GETFL);
+        fprintf(stderr, "ps5: fd %d made non-blocking by the guest (host flags %#x, O_NONBLOCK %s)\n", fd, f, f >= 0 && (f & O_NONBLOCK) ? "set" : "not set");
+    }
+    nonblocking[fd] = (unsigned char)(enable != 0);
+}
+static int nonblocking_flag(int fd) { return fd >= 0 && fd < (int)sizeof nonblocking && nonblocking[fd] ? MSG_DONTWAIT : 0; }
+#else
+static int nonblocking_flag(int fd) { (void)fd; return 0; }
+#endif
 static int host_message_flags(CPU *c, uint32_t flags, int receiving) {
     int native = 0;
     if (flags & 0x1) native |= MSG_OOB;
@@ -141,7 +157,7 @@ static int integer_option(int level, int name, int *native_level, int *native_na
         {1, 10, SOL_SOCKET, SO_OOBINLINE}, {1, 15, SOL_SOCKET, SO_REUSEPORT}, {1, 18, SOL_SOCKET, SO_RCVLOWAT},
         {1, 19, SOL_SOCKET, SO_SNDLOWAT},
         {0, 1, IPPROTO_IP, IP_TOS}, {0, 2, IPPROTO_IP, IP_TTL},
-        {6, 1, IPPROTO_TCP, TCP_NODELAY}, {6, 4, IPPROTO_TCP, TCP_KEEPALIVE},
+        {6, 1, IPPROTO_TCP, TCP_NODELAY}, {6, 4, IPPROTO_TCP, TCP_KEEPIDLE},
         {6, 5, IPPROTO_TCP, TCP_KEEPINTVL}, {6, 6, IPPROTO_TCP, TCP_KEEPCNT},
         {41, 26, IPPROTO_IPV6, IPV6_V6ONLY},
     };
@@ -312,11 +328,10 @@ static int host_addrinfo_flags(CPU *c, uint32_t flags) {
 static int32_t linux_addrinfo_error(int error) {
     switch (error) {
     case 0: return 0;
-    case EAI_ADDRFAMILY: return -9; case EAI_AGAIN: return -3; case EAI_BADFLAGS: return -1;
+    case EAI_AGAIN: return -3; case EAI_BADFLAGS: return -1;
     case EAI_FAIL: return -4; case EAI_FAMILY: return -6; case EAI_MEMORY: return -10;
-    case EAI_NODATA: return -5; case EAI_NONAME: return -2; case EAI_SERVICE: return -8;
+    case EAI_NONAME: return -2; case EAI_SERVICE: return -8;
     case EAI_SOCKTYPE: return -7; case EAI_SYSTEM: return -11; case EAI_OVERFLOW: return -12;
-    case EAI_BADHINTS: return -1; case EAI_PROTOCOL: return -7;
     default: return -4;
     }
 }
@@ -383,12 +398,11 @@ static uint32_t linux_interface_flags(unsigned flags) {
 static uint32_t interface_address(CPU *c, const struct sockaddr *in, int family, uint32_t at) {
     if (!in) return 0;
     struct sockaddr_storage address = {0};
-    size_t length = in->sa_len ? in->sa_len : (family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6));
+    size_t length = (family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6));
     if (length > sizeof(address)) length = sizeof(address);
     memcpy(&address, in, length);
     address.ss_family = (sa_family_t)family;
-    address.ss_len = family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
-    uint8_t bytes[128]; uint32_t size = linux_address(c, &address, address.ss_len, bytes);
+    uint8_t bytes[128]; uint32_t size = linux_address(c, &address, family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6), bytes);
     memcpy(GPTR(at), bytes, size);
     return at;
 }
@@ -434,6 +448,9 @@ static int net_shim(CPU *c, const char *name) {
         if (flags & ~(0x800 | 0x80000) || kind < 1 || kind > 5 || kind == 4) { fail(c, 22); return 1; }
         int fd = socket(native_domain, kind, protocol);
         if (fd >= 0 && (flags & 0x800) && fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)) { error = errno; close(fd); errno = error; fd = -1; }
+#ifdef __PROSPERO__
+        if (fd >= 0 && (flags & 0x800)) rt_ps5_mark_nonblocking(fd, 1);
+#endif
         if (fd >= 0 && (flags & 0x80000) && fcntl(fd, F_SETFD, FD_CLOEXEC)) { error = errno; close(fd); errno = error; fd = -1; }
         finish(c, fd);
     } else if (!strcmp(name, "bind") || !strcmp(name, "connect")) {
@@ -457,7 +474,7 @@ static int net_shim(CPU *c, const char *name) {
         finish(c, result);
     } else if (!strcmp(name, "send") || !strcmp(name, "sendto")) {
         int fd = (int32_t)rt_arg32(c, 0); uint32_t buffer = rt_arg32(c, 1), size = rt_arg32(c, 2);
-        int flags = host_message_flags(c, rt_arg32(c, 3), 0);
+        int flags = host_message_flags(c, rt_arg32(c, 3), 0) | nonblocking_flag(fd);
         const void *data = rt_span(c, buffer, size);
         uint32_t target = !strcmp(name, "sendto") ? rt_arg32(c, 4) : 0;
         if (target && (error = host_address(c, target, rt_arg32(c, 5), &address, &length, 0))) { fail(c, error); return 1; }
@@ -466,7 +483,7 @@ static int net_shim(CPU *c, const char *name) {
         finish(c, result);
     } else if (!strcmp(name, "recv") || !strcmp(name, "recvfrom")) {
         int fd = (int32_t)rt_arg32(c, 0); uint32_t buffer = rt_arg32(c, 1), size = rt_arg32(c, 2);
-        int flags = host_message_flags(c, rt_arg32(c, 3), 1);
+        int flags = host_message_flags(c, rt_arg32(c, 3), 1) | nonblocking_flag(fd);
         void *data = rt_write_span(c, buffer, size);
         uint32_t source = !strcmp(name, "recvfrom") ? rt_arg32(c, 4) : 0, source_length = source ? rt_arg32(c, 5) : 0;
         length = sizeof(address); memset(&address, 0, sizeof(address));

@@ -3,10 +3,11 @@
 - Commit messages in English from 2026-10-29 on (the repo is public). Older
   commits stay in French. Code comments may stay in French; documentation is
   in English.
-- No Steam emulator and no Valve code in the repository: the game is built on
-  the user's machine from their own copy, Steam goes through Valve's own
-  `libsteam_api.dylib` (downloaded by `setup.sh`, never committed), and faking
-  ownership or interfaces is out of scope.
+- No Valve code in the repository: the game is built on the user's machine
+  from their own copy. On macOS, Steam goes through Valve's own
+  `libsteam_api.dylib` (downloaded by `setup.sh`, never committed). This fork
+  also commits the offline Steam stub (`runtime/ios/steam_stub*.c`), which the
+  iOS, Linux and PS5 builds link in place of Valve's library.
 
 ## Tests
 

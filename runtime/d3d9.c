@@ -23,6 +23,7 @@
 #include "frame_times.h"
 #include "sdl_common.h"
 #include <dlfcn.h>
+#include <errno.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -31,6 +32,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
 
 const char *rt_user_root(void);                                            // paths.c
 
@@ -133,9 +135,36 @@ static void *host_metal_layer(void *user, void *hwnd, uint32_t *width, uint32_t 
 // RT_VM_BEGIN-RT_VM_END), alignées sur la page hôte (16 Kio). La table des
 // projections est protégée par le verrou invité : rt_guest_enter est
 // réentrant, il est donc pris ici que l'appelant le tienne déjà ou non.
+#ifdef __PROSPERO__
+// Console: rt_mmap and rt_munmap are kernel calls costing tens of microseconds, and DXVK's guest shadows (one per Lock of a dynamic
+// buffer, freed on Unlock) made them 60 % of the main thread (chamber 05 at 27 fps, 2026-11-24). Freed blocks are kept per
+// power-of-two size class (16 KiB to 16 MiB, 32 a class, 128 MiB in all) and handed out again; their old contents do not matter
+// (a shadow is filled from the buffer when the lock reads, or written by the game).
+enum { SHADOW_MIN_SHIFT = 14, SHADOW_MAX_SHIFT = 24, SHADOW_PER_CLASS = 32 };
+static pthread_mutex_t shadow_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t shadow_cache[SHADOW_MAX_SHIFT + 1][SHADOW_PER_CLASS];
+static unsigned shadow_cached[SHADOW_MAX_SHIFT + 1];
+static size_t shadow_cached_bytes;
+static int shadow_class(size_t size) {
+    int shift = SHADOW_MIN_SHIFT;
+    while (shift <= SHADOW_MAX_SHIFT && ((size_t)1 << shift) < size) ++shift;
+    return shift <= SHADOW_MAX_SHIFT ? shift : -1;
+}
+#endif
 static void *host_alloc_app(void *user, size_t size, size_t align) {
     (void)user;
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
+#ifdef __PROSPERO__
+    int shift = align <= page ? shadow_class(size) : -1;
+    if (shift >= 0) {
+        uint32_t reused = 0;
+        pthread_mutex_lock(&shadow_lock);
+        if (shadow_cached[shift]) { reused = shadow_cache[shift][--shadow_cached[shift]]; shadow_cached_bytes -= (size_t)1 << shift; }
+        pthread_mutex_unlock(&shadow_lock);
+        if (reused) return GPTR(reused);
+        size = (size_t)1 << shift;   // the whole class, so that the block can serve any size of it later
+    }
+#endif
     if (!size || size > UINT32_MAX - page || align > page || (align & (align - 1))) {
         fprintf(stderr, "d3d9: alloc_app(%zu, align %zu) refused (max alignment %zu)\n", size, align, page);
         return NULL;
@@ -157,6 +186,21 @@ static void host_free_app(void *user, void *ptr, size_t size) {
         fprintf(stderr, "d3d9: free_app(%p, %zu) outside alloc_app memory: ignored\n", ptr, size);
         return;
     }
+#ifdef __PROSPERO__
+    int shift = shadow_class(size);
+    if (shift >= 0) {
+        int kept = 0;
+        pthread_mutex_lock(&shadow_lock);
+        if (shadow_cached[shift] < SHADOW_PER_CLASS && shadow_cached_bytes + ((size_t)1 << shift) <= ((size_t)128 << 20)) {
+            shadow_cache[shift][shadow_cached[shift]++] = (uint32_t)offset;
+            shadow_cached_bytes += (size_t)1 << shift;
+            kept = 1;
+        }
+        pthread_mutex_unlock(&shadow_lock);
+        if (kept) return;
+        size = (size_t)1 << shift;   // allocated as the whole class
+    }
+#endif
     rt_guest_enter();
     if (rt_munmap((uint32_t)offset, (uint32_t)size)) fprintf(stderr, "d3d9: free_app(%p, %zu) failed\n", ptr, size);
     rt_guest_leave();
@@ -940,12 +984,16 @@ void rt_d3d9_draw_overlay(void *dev) {   // aussi appelé par tests/checks_d3d9.
     DEV_CALL(VP, dev, s_get_vp, &full);
     static FpsRect rects[FPS_OVERLAY_MAX_RECTS];
     static D3d9Rect boxes[FPS_OVERLAY_MAX_RECTS];
+#ifdef __PROSPERO__
+    int n = fps_overlay_text_rects("PS5", (int)full.Height, rects, FPS_OVERLAY_MAX_RECTS);
+#else
     int n = fps_overlay_text_rects("Metal", (int)full.Height, rects, FPS_OVERLAY_MAX_RECTS);
+#endif
     if (n) {
         DEV_CALL(SetRS, dev, s_set_rs, RS_SCISSOR, 0);
         DEV_CALL(SetRS, dev, s_set_rs, RS_COLORWRITE, 0xf);
         for (int pass = 0; pass < 2; ++pass) {           // ombre décalée, puis texte
-            int d = pass ? 0 : 2;
+            int d = pass ? 0 : (full.Height >= 2000 ? 5 : 2);
             for (int i = 0; i < n; ++i)
                 boxes[i] = (D3d9Rect){rects[i].x + d, rects[i].y + d, rects[i].x + d + rects[i].w, rects[i].y + d + rects[i].h};
             DEV_CALL(Clear, dev, s_clear, (uint32_t)n, boxes, CLEAR_TARGET, pass ? 0xffffd91au : 0xff000000u, 1.0f, 0);
@@ -1073,17 +1121,121 @@ void d3d9_manual_IDirect3DDevice9_SetGammaRamp(CPU *c, void *self, uint32_t a) {
 // entrée périmée : seul un événement en profite, et un événement jamais émis
 // n'a rien à attendre.
 
+#ifdef __PROSPERO__
+// Console: nobody can see the screen from the build machine. Every 10 s (and on the first frame) the back buffer is copied out
+// and written, scaled down to 960 pixels wide, as /data/portal2/screen.bmp (readable over FTP); the present count goes to the
+// trace (rt_ps5_trace). D3D9 calls only, on the device the game presents with.
+void rt_ps5_trace(const char *text);
+uint64_t rt_d3d9_presents(void);
+typedef struct { uint32_t Format, Type, Usage, Pool, MultiSampleType, MultiSampleQuality, Width, Height; } HostSurfaceDesc;
+typedef struct { int32_t Pitch; void *pBits; } HostLockedRect;
+// On request only (a GPU readback stalls the frame): when /data/portal2/screenshot.request exists (checked once a second), the
+// next frame is written and the request removed. tools/ps5/run_title.sh --shot creates it.
+static void ps5_screenshot(void *device) {
+    static time_t last_check;
+    time_t now = time(NULL);
+    if (now == last_check) return;
+    last_check = now;
+    if (access("/data/portal2/screenshot.request", F_OK)) return;
+    unlink("/data/portal2/screenshot.request");
+    void **vt = (void **)D3D9_VTBL(device), *back = NULL, *copy = NULL;
+    char note[200];
+    int32_t hr = ((int32_t (*)(void *, uint32_t, uint32_t, uint32_t, void **))vt[D3D9_SLOT_IDirect3DDevice9_GetBackBuffer])(device, 0, 0, 0, &back);
+    if (hr < 0 || !back) { snprintf(note, sizeof note, "screenshot: GetBackBuffer %#x", (unsigned)hr); rt_ps5_trace(note); return; }
+    void **svt = (void **)D3D9_VTBL(back);
+    HostSurfaceDesc desc = {0};
+    ((int32_t (*)(void *, HostSurfaceDesc *))svt[D3D9_SLOT_IDirect3DSurface9_GetDesc])(back, &desc);
+    hr = ((int32_t (*)(void *, uint32_t, uint32_t, uint32_t, uint32_t, void **, void *))vt[D3D9_SLOT_IDirect3DDevice9_CreateOffscreenPlainSurface])(
+        device, desc.Width, desc.Height, desc.Format, 2 /* D3DPOOL_SYSTEMMEM */, &copy, NULL);
+    if (hr >= 0) hr = ((int32_t (*)(void *, void *, void *))vt[D3D9_SLOT_IDirect3DDevice9_GetRenderTargetData])(device, back, copy);
+    HostLockedRect locked = {0};
+    if (hr >= 0) hr = ((int32_t (*)(void *, HostLockedRect *, const void *, uint32_t))((void **)D3D9_VTBL(copy))[D3D9_SLOT_IDirect3DSurface9_LockRect])(copy, &locked, NULL, 0x10);
+    if (hr >= 0 && locked.pBits && desc.Width && (desc.Format == 21 || desc.Format == 22)) {
+        uint32_t step = (desc.Width + 959) / 960, w = desc.Width / step, h = desc.Height / step, row = (w * 3 + 3) & ~3u;
+        uint8_t *image = malloc((size_t)row * h + 54);
+        if (image) {
+            uint8_t *hd = image;
+            memset(hd, 0, 54);
+            uint32_t size = row * h + 54;
+            hd[0] = 'B'; hd[1] = 'M'; memcpy(hd + 2, &size, 4); hd[10] = 54; hd[14] = 40;
+            memcpy(hd + 18, &w, 4); memcpy(hd + 22, &h, 4); hd[26] = 1; hd[28] = 24;
+            for (uint32_t y = 0; y < h; ++y) {
+                const uint8_t *src = (const uint8_t *)locked.pBits + (size_t)(y * step) * (size_t)locked.Pitch;
+                uint8_t *dst = image + 54 + (size_t)(h - 1 - y) * row;
+                for (uint32_t x = 0; x < w; ++x) memcpy(dst + x * 3, src + (size_t)x * step * 4, 3);
+            }
+            FILE *out = fopen("/data/portal2/screen.tmp", "wb");
+            int written = out ? (int)fwrite(image, 1, size, out) : -errno;
+            if (out) { fclose(out); if (rename("/data/portal2/screen.tmp", "/data/portal2/screen.bmp")) written = -errno; }
+            snprintf(note, sizeof note, "screenshot: wrote %d of %u bytes (%ux%u)", written, size, w, h);
+            rt_ps5_trace(note);
+            free(image);
+        }
+        ((int32_t (*)(void *))((void **)D3D9_VTBL(copy))[D3D9_SLOT_IDirect3DSurface9_UnlockRect])(copy);
+    }
+    snprintf(note, sizeof note, "screenshot: %ux%u format %u, hr %#x, presents %llu", desc.Width, desc.Height, desc.Format,
+             (unsigned)hr, (unsigned long long)rt_d3d9_presents());
+    rt_ps5_trace(note);
+    if (copy) ((uint32_t (*)(void *))((void **)D3D9_VTBL(copy))[D3D9_SLOT_IUnknown_Release])(copy);
+    ((uint32_t (*)(void *))svt[D3D9_SLOT_IUnknown_Release])(back);
+}
+// Frame pacing, to the trace every 10 s: frames, average and worst frame time, frames over 20 and 34 ms (a missed 60 Hz vblank
+// pair). Cheap: one clock read per frame.
+_Atomic uint64_t rt_ps5_last_present_ns;   // CLOCK_MONOTONIC of the last present (ps5_title.c: hitch sampling)
+static char stats_note[160];
+static _Atomic int stats_ready;
+static void ps5_frame_stats(void) {
+    static struct timespec previous, window_start;
+    static unsigned frames, over20, over34;
+    static double worst, total;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (previous.tv_sec) {
+        double ms = (double)(now.tv_sec - previous.tv_sec) * 1e3 + (double)(now.tv_nsec - previous.tv_nsec) / 1e6;
+        ++frames; total += ms;
+        if (ms > worst) worst = ms;
+        if (ms > 20) ++over20;
+        if (ms > 34) ++over34;
+    } else window_start = now;
+    previous = now;
+    rt_ps5_last_present_ns = (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
+    if (now.tv_sec - window_start.tv_sec >= 10 && frames) {
+        // Written by the watchdog thread (rt_ps5_frame_stats_flush): a file write here would be a hitch in what it measures.
+        if (!stats_ready) {
+            snprintf(stats_note, sizeof stats_note, "frames: %u in 10 s, average %.1f ms, worst %.1f ms, over 20 ms %u, over 34 ms %u",
+                     frames, total / frames, worst, over20, over34);
+            stats_ready = 1;
+        }
+        frames = over20 = over34 = 0; worst = total = 0; window_start = now;
+    }
+}
+void rt_ps5_frame_stats_flush(void) {
+    if (!stats_ready) return;
+    char note[sizeof stats_note];
+    memcpy(note, stats_note, sizeof note);
+    stats_ready = 0;
+    rt_ps5_trace(note);
+}
+#endif
+uint64_t rt_d3d9_presents(void) { return presents_done; }
+
 static int d3d9_present_call(CPU *c, const char *name, void *data) {
     const D3d9Method *m = data;
     if (m->name[9] == 'D') {   // IDirect3DDevice9::Present (pas la chaîne d'échange)
         void *device = self_of(c, m);
         rt_native_plugins_present(device);   // greffons natifs (native_plugin.c)
         rt_d3d9_draw_overlay(device);
+#ifdef __PROSPERO__
+        ps5_screenshot(device);
+#endif
     }
     uint64_t ticket = ++presents_started;
     d3d9_call(c, name, data);
     if ((int32_t)c->eax >= 0) {
         if (presents_done < ticket) presents_done = ticket;
+#ifdef __PROSPERO__
+        if (m->name[9] == 'D') ps5_frame_stats();
+#endif
         rt_frame_log_tick();                                  // P2_FRAME_LOG, Mac et iOS (sdl_video.c)
         void (*hook)(void) = rt_d3d9_on_present;
         if (hook) hook();

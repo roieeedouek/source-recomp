@@ -1,7 +1,7 @@
 /* Généré par tools/gen_steam_stub.py depuis runtime/steam_generated.c. Ne pas modifier. */
 /* Stub Steam du build iOS seulement : voir runtime/ios/steam_stub.c. */
 #include <TargetConditionals.h>
-#if TARGET_OS_IPHONE
+#if TARGET_OS_IPHONE || defined(__linux__) || defined(__PROSPERO__)
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>

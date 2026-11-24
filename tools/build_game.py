@@ -34,7 +34,8 @@ RUNTIME = ROOT / 'runtime'
 # Identique à HOST_CFLAGS/HOST_LIBS du Makefile (tools/bench.py les importe d'ici) ;
 # préfixe Homebrew ou bundle précompilé, voir localconfig.host_prefix.
 HOST_CFLAGS, HOST_LIBS = localconfig.host_flags()
-WARNINGS = ['-Wall', '-Wextra', '-Werror']
+CC = 'clang'   # --target ps5 switches it to the payload SDK's prospero-clang
+WARNINGS = ['-w'] if sys.platform.startswith('linux') else ['-Wall', '-Wextra', '-Werror']
 DEBUG = {'full': '-g', 'lines': '-gline-tables-only', 'none': '-g0'}
 # Generated functions name `CPU *restrict c` hundreds of times; past LLVM's
 # default capture-tracking budget clang assumes guest stores may alias *c and
@@ -225,7 +226,7 @@ def compile_units(units, cache, jobs, compiler_identity):
         temporary = obj.with_name(f'.{obj.name}.{os.getpid()}.tmp')
         started = time.time()
         # cwd: the flags keep their relative -Iruntime (part of the object keys).
-        result = subprocess.run(['clang', '-c', *flags, str(source), '-o', str(temporary)],
+        result = subprocess.run([CC, '-c', *flags, str(source), '-o', str(temporary)],
                                 capture_output=True, text=True, cwd=ROOT)
         if result.returncode:
             temporary.unlink(missing_ok=True)
@@ -273,6 +274,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     games.add_argument(parser)
     parser.add_argument('--layout', type=Path, help='default: <build_dir>/prep/layout.json of the game')
+    parser.add_argument('--target', choices=('host', 'ps5'), default='host',
+                        help='ps5: cross-compile for a jailbroken PS5 with the payload SDK (PS5_PAYLOAD_SDK); '
+                             'reuses the lifted C, own object cache build/<game>/obj-ps5, default output build/portal2-ps5.elf')
+    parser.add_argument('--shared', action='store_true',
+                        help='ps5: link the game as a shared library (build/portal2-ps5.so) for the launcher (tools/ps5/launcher.c) to dlopen')
+    parser.add_argument('--title', action='store_true',
+                        help='ps5: compile for a native title (-DRT_PS5_TITLE: no dlopen, RADV linked in) and stop after writing '
+                             '<build_dir>/link.rsp; tools/ps5/build_title.sh links it (docs/ps5.md)')
     parser.add_argument('--out', type=Path, help='default: the game\'s binary (build/portal2-native, build/hl2/hl2-native)')
     parser.add_argument('--opt', default='1', choices=['0', '1', '2', '3'], help='generated code')
     parser.add_argument('--runtime-opt', choices=['0', '1', '2', '3'], help='runtime and main (default: --opt)')
@@ -308,11 +317,20 @@ def main():
     parser.add_argument('--config', type=Path, default=localconfig.DEFAULT_PATH,
                         help='game_root: game copy holding bin/linux32/*.asi (PE plugins)')
     args = parser.parse_args()
+    global CC, HOST_CFLAGS, HOST_LIBS, WARNINGS
+    if args.target == 'ps5':
+        sdk = os.environ.get('PS5_PAYLOAD_SDK')
+        if not sdk or not (Path(sdk) / 'bin/prospero-clang').exists():
+            parser.exit(1, 'set PS5_PAYLOAD_SDK to the payload SDK (with the pacbrew libraries: SDL2, openal, freetype)\n')
+        CC = str(Path(sdk) / 'bin/prospero-clang')
+        HOST_CFLAGS, HOST_LIBS = localconfig.host_flags(target='ps5')
+        WARNINGS = ['-w']
+        if '--debug' not in sys.argv: args.debug = 'none'   # the image is ~340 MB of code: no debug info
     config = localconfig.game_config(localconfig.load(args.config), args.game)
     game = games.profile(config)
     build_dir = args.build_dir or ROOT / game['build_dir']
     args.layout = args.layout or build_dir / 'prep/layout.json'
-    args.out = args.out or ROOT / game['binary']
+    args.out = args.out or (ROOT / ('build/portal2-ps5.so' if args.shared else 'build/portal2-ps5.elf') if args.target == 'ps5' else ROOT / game['binary'])
     args.stats = args.stats or build_dir / 'build-stats.json'
     if not args.layout.exists():
         parser.exit(1, f'{args.layout} missing: run python3 tools/gameprep.py --game {game["name"]}\n')
@@ -334,7 +352,7 @@ def main():
     unimplemented = sorted({imports[a] for a in manifest['used_imports']} - lift.SHIMS)
     if unimplemented:
         print('Runtime traps for unimplemented imports: ' + ', '.join(unimplemented))
-    identity = subprocess.run(['clang', '--version'], capture_output=True, text=True, check=True).stdout
+    identity = subprocess.run([CC, '--version'], capture_output=True, text=True, check=True).stdout
     memory = (['-DRT_FAST_MEMORY'] if args.fast_memory else []) + (['-DRT_TRACED_CALLS'] if args.traced_calls else [])
     program = layout['program']
     if program == 'vbsp_linux':
@@ -349,26 +367,47 @@ def main():
         profile = [f'-fprofile-instr-use={args.pgo_use.resolve()}', '-Wno-profile-instr-unprofiled',
                    '-Wno-profile-instr-out-of-date', '-Wno-profile-instr-missing']
     runtime_flags = [f'-O{args.runtime_opt or args.opt}', '-g', *WARNINGS, *memory, *profile, '-Iruntime', *HOST_CFLAGS]
+    extra_link = []
+    if args.target == 'ps5':
+        # Direct3D 9 on Vulkan is DXVK Native built for the console (deps/dxvk-native/build-ps5, runtime/d3d9/): linked in
+        # statically, like libd3d9metal on iOS.
+        runtime_flags.append('-DRT_D3D9METAL_STATIC')
+        if args.title: runtime_flags.append('-DRT_PS5_TITLE')
+        dxvk = Path(os.environ.get('P2_DXVK_PS5', ROOT.parent / 'deps/dxvk-native/build-ps5'))
+        extra_link = sorted((dxvk / 'src/d3d9/libdxvk_d3d9.so.p').glob('*.o'))
+        extra_link += [dxvk / f'src/{d}/lib{n}.a' for d, n in (('dxvk', 'dxvk'), ('dxso', 'dxso'), ('spirv', 'spirv'),
+                                                              ('vulkan', 'vkcommon'), ('wsi', 'wsi'), ('util', 'util'))]
+        missing = [str(p) for p in extra_link if not p.exists()]
+        if missing or not extra_link:
+            parser.exit(1, 'DXVK for the console is not built (ninja -C deps/dxvk-native/build-ps5): ' + ', '.join(missing[:2]) + '\n')
     generated_flags = [f'-O{args.opt}', DEBUG[args.debug], *GENERATED_TUNING, *WARNINGS, *memory, *profile, '-Iruntime']
+    if sys.platform.startswith('linux') and args.target == 'host':   # `linux` is a predefined macro in GNU mode; rt.h names a parameter that
+        generated_flags += ['-Ulinux', '-std=gnu11']
     sources = build_dir / 'gen/src'
     units = [(str(p), runtime_flags) for p in sorted(RUNTIME.glob('*.c'))]
+    if sys.platform.startswith('linux') or args.target == 'ps5':   # offline Steam stub, as on iOS
+        units += [(str(RUNTIME / 'ios' / n), runtime_flags) for n in ('steam_stub.c', 'steam_stub_generated.c')]
     units.append((str(ROOT / 'src/main.c'), [*runtime_flags, f'-DRT_GAME_PROGRAM="{program}"']))
     units += [(str(sources / name), generated_flags) for name in sorted(manifest['shards'])]
     units.append((str(sources / 'dispatch.c'), generated_flags))
     units += [(str(p), generated_flags) for p in plugin_sources]
     # Objets instrumentés à part : supprimables d'un bloc une fois le profil extrait.
-    cache = build_dir / ('obj-pgo-generate' if args.pgo_generate else 'obj')
+    cache = build_dir / (('obj-ps5-pgo-generate' if args.target == 'ps5' else 'obj-pgo-generate') if args.pgo_generate
+                         else 'obj-ps5' if args.target == 'ps5' else 'obj')
     compile_started = time.time()
     objects, compiled, cpu = compile_units(units, cache, args.jobs, identity)
     compile_time = time.time() - compile_started
     link_started = time.time()
     response = build_dir / 'link.rsp'
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    write_link_response(response, objects)
+    write_link_response(response, [*objects, *extra_link])
+    if args.title:
+        print(f'{compiled}/{len(units)} files compiled in {compile_time:.0f} s; objects listed in {response}')
+        return
     temporary = args.out.with_name(f'.{args.out.name}.tmp')
-    link_flags = (['-fprofile-instr-generate'] if args.pgo_generate else []) + \
+    link_flags = (['-shared', f'-Wl,--version-script={ROOT}/tools/ps5/exports.map', '-Wl,--wrap=dlopen', '-Wl,--wrap=dlsym', '-Wl,--wrap=dlerror', '-Wl,--wrap=dlclose'] if args.shared else []) + (['-fprofile-instr-generate'] if args.pgo_generate else []) + \
         ([f'-Wl,-order_file,{args.order_file}'] if args.order_file else [])
-    subprocess.run(['clang', f'@{response}', *HOST_LIBS, *link_flags, '-o', str(temporary)], check=True)
+    subprocess.run([CC, f'@{response}', *HOST_LIBS, *link_flags, '-o', str(temporary)], check=True)
     os.replace(temporary, args.out)
     link_time = time.time() - link_started
     removed = collect_garbage(cache, digest(runtime_flags, generated_flags), objects)

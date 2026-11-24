@@ -135,6 +135,11 @@ static void *open_library(void) {
     void *handle = __atomic_load_n(&library, __ATOMIC_ACQUIRE);
     if (handle) return handle;
     const char *path = steam_dylib_path();
+#if defined(__linux__) || defined(__PROSPERO__)
+    // "@self": the offline stub (runtime/ios/steam_stub.c) is linked into this executable.
+    if (!strcmp(path, "@self")) handle = dlopen(NULL, RTLD_NOW);
+    else
+#endif
     handle = *path ? dlopen(path, RTLD_NOW | RTLD_LOCAL) : NULL;
     if (handle) {
         void *expected = NULL;

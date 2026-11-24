@@ -10,7 +10,13 @@
 #include <OpenGL/glext.h>
 #include <dlfcn.h>
 static inline void *rt_host_gl_open(void) {
-    return dlopen("/System/Library/Frameworks/OpenGL.framework/OpenGL", RTLD_LAZY | RTLD_LOCAL);
+    return dlopen(
+#ifdef __linux__
+        "libGL.so.1"
+#else
+        "/System/Library/Frameworks/OpenGL.framework/OpenGL"
+#endif
+        , RTLD_LAZY | RTLD_LOCAL);
 }
 static inline void *rt_host_gl_symbol(void *library, const char *name) { return dlsym(library, name); }
 #endif

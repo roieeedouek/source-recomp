@@ -1926,7 +1926,9 @@ def generate_sharded(layout, specs, whole_game, objdump, disasm_cache, out_dir, 
     selected = [(name, resolve_export(layout, name)) for name in specs]
     imports = import_map(layout)
     roots = {entry for _, entry in selected}
-    named = set(roots)
+    # Roots learned at run time (":code:" offsets, config/*-roots.json) depend on the exact depot build:
+    # one that does not decode here is reported as not compiled, not fatal.
+    named = {entry for name, entry in selected if ':code:' not in name}
     if whole_game:
         for module in layout['modules']:
             roots.update(module_roots(module))

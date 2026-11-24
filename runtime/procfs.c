@@ -5,7 +5,9 @@
 // Les autres chemins /proc renvoient ENOENT et sont signalés une fois.
 #include "rt.h"
 #include <errno.h>
+#if !defined(__linux__) && !defined(__PROSPERO__)
 #include <mach/mach.h>
+#endif
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +33,21 @@ static uint64_t sysctl_u64(const char *name) {
     return value;
 }
 
+#ifdef __PROSPERO__
+static int write_meminfo(FILE *out) {
+    unsigned long long page = (unsigned long long)sysconf(_SC_PAGESIZE), total = (unsigned long long)sysconf(_SC_PHYS_PAGES) * page;
+    fprintf(out, "MemTotal:       %8llu kB\nMemFree:        %8llu kB\nMemAvailable:   %8llu kB\nBuffers:               0 kB\nCached:                0 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\n",
+            total / 1024, total / 2048, total / 2048);
+    return 0;
+}
+#elif defined(__linux__)
+static int write_meminfo(FILE *out) {
+    FILE *in = fopen("/proc/meminfo", "r"); char line[256];
+    if (!in) return -1;
+    while (fgets(line, sizeof line, in)) fputs(line, out);
+    fclose(in); return 0;
+}
+#else
 static int write_meminfo(FILE *out) {
     uint64_t total = sysctl_u64("hw.memsize");
     vm_size_t page = 0; host_page_size(mach_host_self(), &page);
@@ -55,6 +72,8 @@ static int write_meminfo(FILE *out) {
     fprintf(out, "SwapFree:       %8llu kB\n", (unsigned long long)(swap.xsu_avail / kb));
     return 0;
 }
+
+#endif
 
 // Cohérent avec rt_cpuid (cpu.c) : un processeur logique, famille 6,
 // modèle 15, révision 2, fpu tsc cx8 cmov mmx fxsr sse sse2, TSC à 1 GHz.
@@ -90,6 +109,21 @@ static int write_cpuinfo(FILE *out) {
     return 0;
 }
 
+#ifdef __PROSPERO__
+static int write_statm(FILE *out) {
+    unsigned long long size = (UINT64_C(1) << 32) / 4096;
+    fprintf(out, "%llu %llu 0 0 0 %llu 0\n", size, size / 4, size / 4);
+    return 0;
+}
+#elif defined(__linux__)
+static int write_statm(FILE *out) {
+    FILE *in = fopen("/proc/self/statm", "r"); unsigned long long size = 0, resident = 0;
+    if (in) { if (fscanf(in, "%llu %llu", &size, &resident) != 2) resident = 0; fclose(in); }
+    size = (UINT64_C(1) << 32) / 4096;
+    fprintf(out, "%llu %llu 0 0 0 %llu 0\n", size, resident, resident);
+    return 0;
+}
+#else
 static int write_statm(FILE *out) {
     mach_task_basic_info_data_t info; mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
     if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) return -1;
@@ -98,6 +132,7 @@ static int write_statm(FILE *out) {
     fprintf(out, "%llu %llu 0 0 0 %llu 0\n", size, resident, resident);
     return 0;
 }
+#endif
 
 static int write_cmdline(FILE *out) {
     pthread_mutex_lock(&lock);
@@ -111,6 +146,17 @@ static int write_overcommit(FILE *out) { return fputs("0\n", out) < 0 ? -1 : 0; 
 
 // /proc/<pid>/cmdline d'un autre processus : arguments réels via KERN_PROCARGS2.
 static int other_pid;
+#ifdef __PROSPERO__
+static int write_other_cmdline(FILE *out) { (void)out; return -1; }
+#elif defined(__linux__)
+static int write_other_cmdline(FILE *out) {
+    char path[64]; snprintf(path, sizeof path, "/proc/%d/cmdline", other_pid);
+    FILE *in = fopen(path, "r"); char buf[4096]; size_t n;
+    if (!in) return -1;
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, n, out);
+    fclose(in); return 0;
+}
+#else
 static int write_other_cmdline(FILE *out) {
     int mib[3] = {CTL_KERN, KERN_PROCARGS2, other_pid};
     size_t size = 0;
@@ -130,6 +176,7 @@ static int write_other_cmdline(FILE *out) {
     free(buffer);
     return 0;
 }
+#endif
 
 typedef struct { const char *path, *file; int (*writer)(FILE *); } ProcFile;
 static const ProcFile files[] = {
@@ -180,9 +227,16 @@ const char *rt_proc_path(const char *path) {
         if (fclose(out) || failed || rename(temporary, result)) { unlink(temporary); errno = EIO; return NULL; }
         return result;
     }
+    // Une fois par chemin : le jeu sonde /proc à chaque image sur certaines plateformes (une ligne de journal par image).
     static pthread_mutex_t report_lock = PTHREAD_MUTEX_INITIALIZER;
+    static char reported[16][64];
     pthread_mutex_lock(&report_lock);
-    fprintf(stderr, "[procfs] %s is not emulated (ENOENT)\n", path);
+    int seen = 0;
+    for (int i = 0; i < 16 && reported[i][0] && !seen; ++i) seen = !strncmp(reported[i], path, sizeof reported[i] - 1);
+    if (!seen) {
+        for (int i = 0; i < 16; ++i) if (!reported[i][0]) { snprintf(reported[i], sizeof reported[i], "%s", path); break; }
+        fprintf(stderr, "[procfs] %s is not emulated (ENOENT)\n", path);
+    }
     pthread_mutex_unlock(&report_lock);
     errno = ENOENT;
     return NULL;

@@ -5,6 +5,25 @@
 #include <stdio.h>
 #include <unistd.h>
 
+#ifdef __PROSPERO__
+// PS5: the guest window is backed by direct memory (runtime/ps5.c), not by
+// anonymous or file mappings: "mapping" is commit + fill + protect.
+static int ps5_map(uint32_t address, uint32_t size, int protection, int anonymous, int fd, uint64_t offset) {
+    if (rt_ps5_commit(address, size)) { errno = ENOMEM; return -1; }
+    if (mprotect(M + address, size, PROT_READ | PROT_WRITE)) return -1;
+    if (anonymous) memset(M + address, 0, size);
+    else {
+        memset(M + address, 0, size);
+        size_t done = 0;
+        while (done < size) {   // file contents are read in: no file mappings on the console
+            ssize_t n = pread(fd, M + address + done, size - done, (off_t)(offset + done));
+            if (n <= 0) break;
+            done += (size_t)n;
+        }
+    }
+    return protection == (PROT_READ | PROT_WRITE) ? 0 : mprotect(M + address, size, protection);
+}
+#endif
 uint8_t rt_vm_permissions[(RT_VM_END - RT_VM_BEGIN) / 4096] __attribute__((aligned(64)));
 typedef struct Mapping { uint32_t address, size; int anonymous; struct Mapping *next; } Mapping;
 static Mapping *mappings;
@@ -33,7 +52,11 @@ static int update_host_permissions(uint32_t address, uint32_t size, int discard_
             for (uint64_t p = base; p < base + host_page; p += 4096)
                 any_mapping |= rt_vm_permissions[(p - RT_VM_BEGIN) >> 12] & 8;
             if (!any_mapping) {
+#ifdef __PROSPERO__
+                if (mprotect(M + base, (size_t)host_page, PROT_NONE)) return -1;   // stays backed; zeroed on the next map
+#else
                 if (mmap(M + base, (size_t)host_page, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0) == MAP_FAILED) return -1;
+#endif
                 continue;
             }
         }
@@ -68,7 +91,12 @@ uint32_t rt_mmap(CPU *c, uint32_t hint, uint32_t length, int protection, uint32_
     int native_flags = MAP_FIXED | ((flags & 1) ? MAP_SHARED : MAP_PRIVATE);
     if (flags & 0x20) { native_flags |= MAP_ANON; fd = -1; offset = 0; }
     int native_protection = (int)page_flags(protection) & 3;
+#ifdef __PROSPERO__
+    (void)native_flags;
+    if (ps5_map(address, size, native_protection, (flags & 0x20) != 0, fd, offset)) { free(m); return UINT32_MAX; }
+#else
     if (mmap(M + address, size, native_protection, native_flags, fd, (off_t)offset) == MAP_FAILED) { free(m); return UINT32_MAX; }
+#endif
     m->address = address; m->size = align_up(length, 4096); m->anonymous = (flags & 0x20) != 0;
     m->next = *link; *link = m;
     memset(rt_vm_permissions + ((address - RT_VM_BEGIN) >> 12), (int)page_flags(protection), align_up(length, 4096) / 4096);

@@ -86,7 +86,7 @@ int fps_overlay_text(const char *text, int x, int y, int scale, FpsRect *out, in
 
 // Les deux lignes du compteur F3, en haut à gauche, à l'échelle de l'écran.
 int fps_overlay_layout(const char *line1, const char *line2, int drawable_height, FpsRect *out, int max) {
-    int scale = drawable_height >= 1200 ? 4 : 3, n = 0;
+    int scale = drawable_height >= 2000 ? 8 : drawable_height >= 1200 ? 4 : 3, n = 0;   // 4K : lisible sur un téléviseur
     const char *lines[2] = {line1, line2};
     for (int l = 0; l < 2; ++l) {
         int m = fps_overlay_text(lines[l], 12 * scale / 3, 12 + l * 9 * scale, scale, out + n, max > n ? max - n : 0);

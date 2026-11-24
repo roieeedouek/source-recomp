@@ -95,6 +95,7 @@ static size_t environ_slot_count;
 
 // errno Darwin et Linux coïncident de 1 à 34 (sauf EAGAIN/EDEADLK : 11/35 inversés,
 // traités avant la table par rt_linux_errno/rt_darwin_errno).
+#ifndef __linux__
 static const struct { int darwin, linux_value; } errno_table[] = {
     {EINPROGRESS, 115}, {EALREADY, 114}, {ENOTSOCK, 88},
     {EDESTADDRREQ, 89}, {EMSGSIZE, 90}, {EPROTOTYPE, 91}, {ENOPROTOOPT, 92},
@@ -113,21 +114,30 @@ static const struct { int darwin, linux_value; } errno_table[] = {
     {EBADRPC, 5}, {ERPCMISMATCH, 5}, {EPROGUNAVAIL, 5}, {EPROGMISMATCH, 5}, {EPROCUNAVAIL, 5},
     {ENOPOLICY, 1}, {EQFULL, 105},
 };
+#endif
 int rt_linux_errno(int value) {
+#ifdef __linux__
+    return value;   // host errno is already Linux
+#else
     if (value == EDEADLK) return 35;
     if (value == EAGAIN) return 11;
     if (value > 0 && value <= 34) return value;
     for (size_t i = 0; i < sizeof(errno_table) / sizeof(*errno_table); ++i)
         if (errno_table[i].darwin == value) return errno_table[i].linux_value;
     return 5; // erreur Darwin sans équivalent Linux : EIO
+#endif
 }
 int rt_darwin_errno(int value) {
+#ifdef __linux__
+    return value;
+#else
     if (value == 11) return EAGAIN;
     if (value == 35) return EDEADLK;
     if (value > 0 && value <= 34) return value;
     for (size_t i = 0; i < sizeof(errno_table) / sizeof(*errno_table); ++i)
         if (errno_table[i].linux_value == value) return errno_table[i].darwin;
     return 0;
+#endif
 }
 static uint32_t errno_slot(CPU *c) {
     if (!errno_address) {

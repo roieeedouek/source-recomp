@@ -284,7 +284,9 @@ static int hidden_windows(void) { return RT_ENV_FLAG("P2_HIDDEN_WINDOWS"); }
 // basculée à chaud ; tailles, positions et coordonnées de souris vues par le
 // jeu sont converties. P2_RETINA=0 désactive tout (comportement d'origine).
 #include <SDL2/SDL_syswm.h>
+#if !defined(__linux__) && !defined(__PROSPERO__)
 #include <objc/message.h>
+#endif
 static int display_scale_value, display_scale_forced, window_scale_value = 1;
 
 static int retina_enabled(void) {
@@ -352,7 +354,7 @@ int rt_sdl_notch_height(int height, int frame_h, int visible_top, double safe_to
     return visible_top;
 }
 
-#if !TARGET_OS_IPHONE
+#if !TARGET_OS_IPHONE && !defined(__linux__) && !defined(__PROSPERO__)
 // Mesurée à la première demande pour chaque écran, barre des menus visible, puis
 // gardée : en plein écran la barre se masque et la zone visible gagne un point
 // que la fenêtre ne reçoit pas. Sans encoche (écrans externes, Mac plus anciens),
@@ -416,8 +418,8 @@ static void set_backing(SDL_Window *window, int scale) {
     fprintf(stderr, "[sdl] Retina: window scale %d\n", scale);
     SDL_SysWMinfo info;
     SDL_VERSION(&info.version);
-#if TARGET_OS_IPHONE
-    (void)window;
+#if TARGET_OS_IPHONE || defined(__linux__) || defined(__PROSPERO__)
+    (void)window; (void)info;
 #else
     if (display_scale_forced || !SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_COCOA) return;
     id view = ((id (*)(id, SEL))objc_msgSend)((id)info.info.cocoa.window, sel_registerName("contentView"));
@@ -451,7 +453,7 @@ static void log_geometry(SDL_Window *window, const char *why) {
     SDL_GetDisplayBounds(0, &bounds);
     SDL_GetDisplayUsableBounds(0, &usable);
     double inset[4] = {0};
-#if !TARGET_OS_IPHONE   // iOS : pas de fenêtre Cocoa (zone sûre gérée par ios/sdl_ios.m)
+#if !TARGET_OS_IPHONE && !defined(__linux__) && !defined(__PROSPERO__)   // iOS : pas de fenêtre Cocoa (zone sûre gérée par ios/sdl_ios.m)
     SDL_SysWMinfo info;
     SDL_VERSION(&info.version);
     if (!display_scale_forced && SDL_GetWindowWMInfo(window, &info) && info.subsystem == SDL_SYSWM_COCOA) {
@@ -498,11 +500,19 @@ static SDL_Window *create_window(const char *title, int x, int y, int w, int h, 
 #if TARGET_OS_IPHONE
 #include "metal_ios.h"
 #endif
+#if defined(__linux__) || defined(__PROSPERO__)
+#define RT_WSI_FLAG SDL_WINDOW_VULKAN   /* DXVK presents through the Vulkan loader; HWND is the SDL_Window* */
+#else
+#define RT_WSI_FLAG SDL_WINDOW_METAL
+#endif
 typedef struct MetalView { SDL_Window *window; SDL_MetalView view; struct MetalView *next; } MetalView;
 static MetalView *metal_views;
 
 uint32_t rt_sdl_window_flags(uint32_t guest_flags) {
     if (!(guest_flags & SDL_WINDOW_VULKAN)) return guest_flags;
+#if defined(__linux__) || defined(__PROSPERO__)
+    return guest_flags & ~(uint32_t)SDL_WINDOW_OPENGL;
+#endif
     return (guest_flags & ~(uint32_t)(SDL_WINDOW_VULKAN | SDL_WINDOW_OPENGL)) | SDL_WINDOW_METAL;
 }
 
@@ -514,11 +524,17 @@ static MetalView *find_metal_view(SDL_Window *window) {
     return v;
 }
 static MetalView *create_metal_view(SDL_Window *window) {
-    if (!pthread_main_np() || !(SDL_GetWindowFlags(window) & SDL_WINDOW_METAL)) return NULL;
+    if (!pthread_main_np() || !(SDL_GetWindowFlags(window) & RT_WSI_FLAG)) return NULL;
+#if defined(__linux__) || defined(__PROSPERO__)
+    SDL_MetalView view = (SDL_MetalView)window;   // no view object: the window itself is the WSI handle
+#else
     SDL_MetalView view = SDL_Metal_CreateView(window);
+#endif
     MetalView *v = view ? malloc(sizeof(*v)) : NULL;
     if (!v) {
+#if !defined(__linux__) && !defined(__PROSPERO__)
         if (view) SDL_Metal_DestroyView(view);
+#endif
         fprintf(stderr, "[sdl] SDL_Metal_CreateView failed: %s\n", SDL_GetError());
         return NULL;
     }
@@ -538,7 +554,12 @@ static void destroy_metal_view(SDL_Window *window) {
     MetalView *v = *link;
     if (v) *link = v->next;
     pthread_mutex_unlock(&lock);
-    if (v) { SDL_Metal_DestroyView(v->view); free(v); }
+    if (v) {
+#if !defined(__linux__) && !defined(__PROSPERO__)
+        SDL_Metal_DestroyView(v->view);
+#endif
+        free(v);
+    }
 }
 
 // CAMetalLayer* de la fenêtre et taille de rendu du jeu en pixels (celle du
@@ -559,7 +580,11 @@ void *rt_sdl_metal_layer(void *window, uint32_t *width, uint32_t *height) {
     drawable_size(w, &dw, &dh);
     if (width) *width = (uint32_t)dw;
     if (height) *height = (uint32_t)dh;
+#if defined(__linux__) || defined(__PROSPERO__)
+    return w;
+#else
     return SDL_Metal_GetLayer(v->view);
+#endif
 }
 
 unsigned rt_sdl_game_modes(uint32_t (*modes)[3], unsigned capacity) {
@@ -689,7 +714,7 @@ static int sdl_video(CPU *c, const char *name) {
         SDL_Window *w = create_window(rt_guest_cstr_or_null(c, rt_arg32(c, 0)), (int)rt_arg32(c, 1), (int)rt_arg32(c, 2),
                                       (int)rt_arg32(c, 3), (int)rt_arg32(c, 4), flags);
         if (w && !(r = rt_handle_new(w, RT_SDL_WINDOW))) { SDL_DestroyWindow(w); rt_trap(c, c->eip, "SDL: handle table full"); }
-        if (w && (flags & SDL_WINDOW_METAL)) create_metal_view(w);   // thread principal : vue prête pour Direct3D 9
+        if (w && (flags & RT_WSI_FLAG)) create_metal_view(w);   // thread principal : vue prête pour Direct3D 9
     } else if (!strcmp(n, "DestroyWindow")) {
         SDL_Window *w = WINDOW(0);
         if (w) { rt_handle_free(rt_arg32(c, 0), RT_SDL_WINDOW); destroy_metal_view(w); }

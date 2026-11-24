@@ -97,7 +97,11 @@ int rt_paths_init(const char *game,const char *linux,const char *user) {
     if(absolute_path(user,user_root))return -1;
     if(mkdir(user_root,0755) && errno!=EEXIST)return -1;
     const char *roots[3]={game_root,linux_root,user_root};
+    #if defined(__linux__) || defined(__PROSPERO__)
+    for(int i=0;i<3;++i)insensitive[i]=0;   // Linux and PS5 filesystems are case sensitive here
+#else
     for(int i=0;i<3;++i)insensitive[i]=pathconf(roots[i],_PC_CASE_SENSITIVE)==0;
+#endif
 #if TARGET_OS_IPHONE
     // iOS compare la casse même sur un volume insensible (bac à sable) : les
     // variantes du correcteur de casse de Source sont résolues ici et par
