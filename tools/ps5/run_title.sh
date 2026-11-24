@@ -2,7 +2,7 @@
 # Uploads the built title, launches it through the console's shell server and prints its log.
 #   PS5_HOST=<console address> tools/ps5/run_title.sh [--no-upload] [--wait SECONDS] [TITLE_ID]
 #   tools/ps5/run_title.sh --shot OUT.png      screenshot of the running game (it writes /data/portal2/screen.bmp on request)
-#   tools/ps5/run_title.sh --profile main|submit|record   10 s of instruction-address samples of the running game, symbolized (tools/ps5/profile_report.py)
+#   tools/ps5/run_title.sh --profile main|submit|record|present   10 s of instruction-address samples of the running game, symbolized (tools/ps5/profile_report.py)
 # Needs on the console: an FTP server (port 2120 or 2121: probed), shsrv on 2323. The game writes /data/portal2/log.txt; this prints
 # it from the last "=== portal2 title starts" marker. Ends when the log shows an exit or a fatal signal, or after the wait.
 set -euo pipefail

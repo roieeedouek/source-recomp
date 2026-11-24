@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <sys/sysctl.h>
 #include <time.h>
+#include <signal.h>
 
 typedef struct ThreadAttr {
     uint32_t address,size;
@@ -36,6 +37,21 @@ static pthread_mutex_t join_lock=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t join_cond=PTHREAD_COND_INITIALIZER;
 static pthread_key_t foreign_key;
 static ThreadAttr *find_attr(uint32_t address){for(ThreadAttr *a=attributes;a;a=a->next)if(a->address==address)return a;return NULL;}
+#ifdef __PROSPERO__
+// Diagnostic for a stall (runtime/ps5_title.c): every live guest thread is sent `signal`, after a line naming its native id and
+// guest entry point, so that each sampled stack can be matched to its thread. Read without the gate: a thread list changing at
+// that moment only costs a sample.
+void rt_ps5_trace(const char *text);
+void rt_threads_sample(int signal) {
+    for (Thread *t = threads; t; t = t->next) {
+        if (t->finished || t->foreign) continue;
+        char note[120];
+        snprintf(note, sizeof note, "guest thread %#x: native %p, entry %#x, argument %#x", t->handle, (void *)t->native, t->entry, t->argument);
+        rt_ps5_trace(note);
+        pthread_kill(t->native, signal);
+    }
+}
+#endif
 static Thread *find_thread(uint32_t handle){for(Thread *t=threads;t;t=t->next)if(t->handle==handle)return t;return NULL;}
 static void unlink_thread(Thread *t){Thread **link=&threads;while(*link && *link!=t)link=&(*link)->next;if(*link)*link=t->next;}
 // Gate held. Frees a joined, detached or foreign record once its guest code is over.
@@ -189,7 +205,16 @@ int rt_thread_shim(CPU *c,const char *name) {
             if(guest_policy>2){c->eax=EINVAL;return 1;}
             policy=guest_policy==1?SCHED_FIFO:guest_policy==2?SCHED_RR:SCHED_OTHER;
             memset(&param,0,sizeof(param));int32_t priority;memcpy(&priority,rt_span(c,rt_arg32(c,2),4),4);param.sched_priority=priority;
+#ifdef __PROSPERO__
+            // The console's scheduler numbers priorities and classes otherwise than Linux (lower is more urgent, real-time
+            // classes for FIFO/RR): a Linux value could starve a thread. P2_IGNORE_THREAD_PRIORITY=1 accepts and ignores.
+            static int ignore=-1;
+            if(ignore<0)ignore=getenv("P2_IGNORE_THREAD_PRIORITY")!=NULL;
+            error=ignore?0:pthread_setschedparam(native,policy,&param);
+            fprintf(stderr,"[threads] pthread_setschedparam(%#x, policy %u, priority %d) -> %d%s\n",address,guest_policy,priority,error,ignore?" (ignored)":"");
+#else
             error=pthread_setschedparam(native,policy,&param);
+#endif
         }
         c->eax=(uint32_t)error;
     } else if(!strcmp(name,"pthread_exit")) {

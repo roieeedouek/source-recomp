@@ -187,6 +187,8 @@ void rt_ps5_frame_stats_flush(void);
 extern _Atomic uint64_t rt_ps5_last_present_ns;
 int rt_ps5_vk_submit_thread(pthread_t *thread);
 int rt_ps5_vk_record_thread(pthread_t *thread);
+int rt_d3d9_present_thread(pthread_t *thread);
+void rt_threads_sample(int signal);
 void rt_ps5_vk_flush(void);
 static volatile int sample_is_hitch;
 // Profiling on request: SIGPROF records only the interrupted instruction address, from the signal context. No stack walk: a
@@ -212,9 +214,9 @@ static void watchdog_sample(int signal) {
     void *frames[40];
     int count = backtrace(frames, 40);
     char line[1200];
-    int length = snprintf(line, sizeof line, "%s: main at %p, %s, presents %llu, %d frames:", sample_is_hitch ? "hitch" : "watchdog",
-                          (void *)main, pthread_equal(pthread_self(), title_main_thread) ? "main thread" : "vulkan submit thread",
-                          (unsigned long long)rt_d3d9_presents(), count);
+    int length = snprintf(line, sizeof line, "%s: main at %p, %s %p, presents %llu, %d frames:", sample_is_hitch ? "hitch" : "watchdog",
+                          (void *)main, pthread_equal(pthread_self(), title_main_thread) ? "main thread" : "thread",
+                          (void *)pthread_self(), (unsigned long long)rt_d3d9_presents(), count);
     for (int i = 0; i < count && length < (int)sizeof line - 20; i++) length += snprintf(line + length, sizeof line - length, " %lx", (unsigned long)(uintptr_t)frames[i]);
     rt_ps5_trace(line);
 }
@@ -259,13 +261,14 @@ static void *watchdog(void *unused) {
             pthread_t target = title_main_thread;
             int submit = !strncmp(what, "submit", 6) && rt_ps5_vk_submit_thread(&target);
             int record = !submit && !strncmp(what, "record", 6) && rt_ps5_vk_record_thread(&target);
+            int present = !submit && !record && !strncmp(what, "present", 7) && rt_d3d9_present_thread(&target);
             profile_next = 0;
             for (int i = 0; i < PROFILE_SAMPLES; ++i) { pthread_kill(target, SIGPROF); usleep(5000); }
             usleep(20000);
             unsigned taken = profile_next < PROFILE_SAMPLES ? profile_next : PROFILE_SAMPLES;
             FILE *out = fopen("/data/portal2/profile.tmp", "w");
             if (out) {
-                fprintf(out, "profile: %s thread, main at %p, %u samples\n", submit ? "submit" : record ? "record" : "main", (void *)main, taken);
+                fprintf(out, "profile: %s thread, main at %p, %u samples\n", submit ? "submit" : record ? "record" : present ? "present" : "main", (void *)main, taken);
                 for (unsigned i = 0; i < taken; ++i) fprintf(out, "%lx %lx\n", (unsigned long)profile_pcs[i], (unsigned long)profile_tops[i]);
                 fclose(out);
                 rename("/data/portal2/profile.tmp", "/data/portal2/profile.txt");
@@ -274,7 +277,12 @@ static void *watchdog(void *unused) {
         }
         if (tick % 15) continue;
         uint64_t now = rt_d3d9_presents();
-        if (now == last) { sample_is_hitch = 0; pthread_kill(title_main_thread, SIGINFO); }
+        if (now == last) {
+            sample_is_hitch = 0;
+            pthread_kill(title_main_thread, SIGINFO);
+            static unsigned all_threads;   // every guest thread too, for the first two stalls
+            if (all_threads++ < 2) { usleep(200000); rt_threads_sample(SIGINFO); }
+        }
         last = now;
     }
     return NULL;
@@ -292,6 +300,23 @@ __attribute__((constructor(102))) static void install_crash_log(void) {
     setenv("DXVK_LOG_PATH", "/data/portal2/tmp", 0);
     // No system fonts: tools/ps5/fonts.conf (the game's own fonts and the family aliases VGUI uses).
     if (!access("/data/portal2/fonts.conf", R_OK)) setenv("FONTCONFIG_FILE", "/data/portal2/fonts.conf", 0);
+    // Environment for the runtime from /data/portal2/env.txt, NAME=value per line (no shell on the console to set it), e.g.
+    // P2_GUEST_CPUS=4. Lines starting with # are ignored; an existing variable is not overridden.
+    {
+        FILE *env = fopen("/data/portal2/env.txt", "r");
+        char line[256];
+        while (env && fgets(line, sizeof line, env)) {
+            line[strcspn(line, "\r\n")] = 0;
+            char *equals = strchr(line, '=');
+            if (line[0] == '#' || !equals || equals == line) continue;
+            *equals = 0;
+            setenv(line, equals + 1, 0);
+            char note[300];
+            snprintf(note, sizeof note, "env: %s=%s", line, equals + 1);
+            rt_ps5_trace(note);
+        }
+        if (env) fclose(env);
+    }
     // Per-import guest call counts, to the log every 10 s (runtime/rt.c), while this file exists.
     if (!access("/data/portal2/import_counts", F_OK)) setenv("P2_IMPORT_COUNTS", "1", 0);
     // The guest lock's wait time on the main thread, to the log every 5 s (runtime/scheduler.c), while this file exists.

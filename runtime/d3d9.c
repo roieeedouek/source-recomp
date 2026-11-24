@@ -1218,11 +1218,25 @@ void rt_ps5_frame_stats_flush(void) {
 }
 #endif
 uint64_t rt_d3d9_presents(void) { return presents_done; }
+#ifdef __PROSPERO__
+// The thread that calls IDirect3DDevice9::Present: the main thread, or Source's render thread under mat_queue_mode 2
+// (profiled by ps5_title.c's "present" target).
+static pthread_t present_thread;
+static _Atomic int have_present_thread;
+int rt_d3d9_present_thread(pthread_t *thread) {
+    if (!have_present_thread) return 0;
+    *thread = present_thread;
+    return 1;
+}
+#endif
 
 static int d3d9_present_call(CPU *c, const char *name, void *data) {
     const D3d9Method *m = data;
     if (m->name[9] == 'D') {   // IDirect3DDevice9::Present (pas la chaîne d'échange)
         void *device = self_of(c, m);
+#ifdef __PROSPERO__
+        if (!have_present_thread || !pthread_equal(present_thread, pthread_self())) { present_thread = pthread_self(); have_present_thread = 1; }
+#endif
         rt_native_plugins_present(device);   // greffons natifs (native_plugin.c)
         rt_d3d9_draw_overlay(device);
 #ifdef __PROSPERO__

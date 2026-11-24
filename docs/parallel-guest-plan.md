@@ -93,6 +93,33 @@ a play session, and the host tests.
 7. **Defaults.** Parallel on the PS5 and Linux x86-64 when it is faster everywhere measured; serial
    stays available (`RT_SERIAL_GUEST`) and remains the macOS default.
 
+## Status (2026-11-25)
+
+Step 1 is blocked: with more than one CPU reported (`P2_GUEST_CPUS=2` or `4`, set on the console
+through `/data/portal2/env.txt`), the game hangs while loading a save, before its second frame, even
+with the serial gate. What is established:
+
+- Source starts a thread pool of N workers (`vstdlib`, all entering `libtier0`'s thread start at
+  `0x10017590`); the start handshake works (each worker signals the main thread, which wakes).
+- The main thread then hands work to the pool (`engine.so` → `vstdlib` near `0x1fed0`) and waits
+  for its completion: a manual-reset event (`CThreadSyncObject::Wait`, `libtier0` `0x16f70`)
+  waited in 10 ms slices, forever.
+- The workers poll their two per-thread events with zero timeouts and sleep 100 ms at a time on a
+  shared event that no thread ever signals, on the PC as on the console. So jobs reach the workers
+  only by polling, which is consistent with "2 or 4 CPUs measured slower" in `docs/usage.md`, and
+  here they never do.
+- Ruled out: the console's condition-variable clock (realtime, as the guest assumes:
+  `tools/ps5/title_cond_probe.c`), error codes (translated to Linux values), thread priorities (the
+  game sets none).
+- The PC build with 4 CPUs did not obviously hang within 8 minutes, but at 3 fps (software
+  rendering) it may not reach the same point; it is not yet known whether this is console-specific.
+
+Next: find what the pool's job hand-off waits for (disassemble `vstdlib` around `0x1fed0` and
+`0x21d10`, name the `0xff01xxxx` call targets, which are not in `layout.json`'s import list), compare
+with a longer PC run, then fix the hand-off before measuring anything. Diagnostics available:
+`P2_TRACE_COND=1` (every guest condition wait and wake, `runtime/pthreads.c`), stall sampling of every
+guest thread (`runtime/threads.c`, `rt_threads_sample`), `--profile present` (the presenting thread).
+
 ## Risks and how they are caught
 
 | Risk | Detection | Fallback |

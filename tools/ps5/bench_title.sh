@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # Frame-rate benchmark of a title build on the console, from a save: installs EBOOT (or the built one), loads SAVE through
 # /data/portal2/args.txt, lets loading settle and averages the frame statistics the title writes to trace.txt every 10 s.
-#   PS5_HOST=<console> tools/ps5/bench_title.sh SAVE [EBOOT] [--settle SECONDS] [--measure SECONDS]
+#   PS5_HOST=<console> tools/ps5/bench_title.sh SAVE [EBOOT] [--settle SECONDS] [--measure SECONDS] [--args "+cvar value ..."]
 # Prints the 10 s windows measured and their mean frame rate. The game is left running.
 set -euo pipefail
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 host=${PS5_HOST:?set PS5_HOST to the console address}
 save=${1:?save name, as for +load (without .sav)}; shift
 eboot=""
-settle=60 measure=60
+settle=60 measure=60 extra=""
 while (($#)); do
-    case $1 in --settle) settle=$2; shift ;; --measure) measure=$2; shift ;; *) eboot=$1 ;; esac
+    case $1 in --settle) settle=$2; shift ;; --measure) measure=$2; shift ;; --args) extra=$2; shift ;; *) eboot=$1 ;; esac
     shift
 done
 ftp=ftp://$host:2120
-printf '+load %s\n' "$save" | curl -sS --disable-epsv --max-time 15 -T - "$ftp/data/portal2/args.txt"
+printf '+load %s %s\n' "$save" "$extra" | curl -sS --disable-epsv --max-time 15 -T - "$ftp/data/portal2/args.txt"
 shell() { printf '%s\nexit\n' "$1" | timeout 20 nc -w 10 "$host" 2323 2>&1 | tr -d '\000' | sed 's/\x1b\[[0-9;]*m//g'; }
 # A running instance holds eboot.bin: stopped first (the shell's kill does not reach an app: killapp.c through the ELF loader).
 app=$(shell ps | awk '/PPSA97622/ && /eboot\.bin/ && !found {print $7; found = 1}')

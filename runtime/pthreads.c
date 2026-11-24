@@ -6,6 +6,7 @@
 #include "modules.h"
 #include <errno.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 
@@ -165,8 +166,18 @@ static Cond *find_or_adopt_cond(CPU *c, uint32_t address) {
     if (!item && address && static_cond_bytes(c, address) && create_cond(address, &item)) item = NULL;
     return item;
 }
+// P2_TRACE_COND=1 (diagnostic): every guest condition wait and wake to standard error, with the guest thread, the condition
+// and mutex addresses, the deadline (seconds, host realtime clock) and the result; the first 4000 events.
+static int trace_conditions(void) {
+    static int enabled = -1;
+    if (enabled < 0) enabled = getenv("P2_TRACE_COND") != NULL;
+    return enabled;
+}
+static _Atomic unsigned traced_events;
 static int cond_wake(CPU *c, uint32_t address, int broadcast) {
     Cond *item = find_or_adopt_cond(c, address);
+    if (trace_conditions() && traced_events++ < 4000)
+        fprintf(stderr, "[cond] thread %#x %s %#x%s\n", c->tid, broadcast ? "broadcast" : "signal", address, item ? "" : " (unknown)");
     if (!item) return EINVAL;
     return broadcast ? pthread_cond_broadcast(&item->native) : pthread_cond_signal(&item->native);
 }
@@ -181,8 +192,16 @@ static int cond_wait(CPU *c, int timed) {
     int held = mutex->kind == 2 && mutex->owned && pthread_equal(mutex->owner, pthread_self());
     if (held) mutex->owned = 0;
     unsigned saved = rt_guest_suspend();
+    if (trace_conditions() && traced_events < 4000) {
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        fprintf(stderr, "[cond] thread %#x wait %#x mutex %#x %s %lld.%03ld (now %lld.%03ld)\n", c->tid, rt_arg32(c, 0), rt_arg32(c, 1),
+                timed ? "until" : "untimed", (long long)deadline.tv_sec, deadline.tv_nsec / 1000000, (long long)now.tv_sec, now.tv_nsec / 1000000);
+    }
     int error = timed ? pthread_cond_timedwait(&item->native, &mutex->native, &deadline)
                       : pthread_cond_wait(&item->native, &mutex->native);
+    if (trace_conditions() && traced_events++ < 4000)
+        fprintf(stderr, "[cond] thread %#x woke %#x: %d\n", c->tid, rt_arg32(c, 0), error);
     rt_guest_resume(saved);
     if (held && error != EPERM && error != EINVAL) lock_acquired(mutex);
     return error;
