@@ -20,6 +20,10 @@ Cloned next to the checkout, in `../deps/`:
 
 - `ps5-vulkan`: RADV for the console (`tools/build-radv.sh release`), its link recipe and the native
   tool that turns the ELF into a title executable. Needs LLD 22 for `-z nodynamic-undefined-weak`.
+  Apply `tools/ps5/patches/radv-videoout-120hz.patch` to its RADV source (`.deps/work/radv-src`,
+  `patch -p1`) before building: it keeps 119.88 Hz on a variable-refresh display (whose idle floor,
+  ~20.9 ms, the unpatched check took for a failed switch) and adds the refresh getter the `fps60`
+  switch uses.
 - `ps5-vulkan-template`: the payload SDK revision the title links against.
 - `ps5-sdk-full`: the payload SDK used to compile the game and the runtime (`PS5_PAYLOAD_SDK`).
 - `dxvk-native`, built for the console in `build-ps5` (`ninja -C deps/dxvk-native/build-ps5`).

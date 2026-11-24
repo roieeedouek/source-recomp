@@ -1,0 +1,75 @@
+--- a/src/vulkan/wsi/wsi_common_videoout.c
++++ b/src/vulkan/wsi/wsi_common_videoout.c
+@@ -43,6 +43,7 @@
+ #include <assert.h>
+ #include <inttypes.h>
+ #include <stdio.h>
++#include <time.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
+@@ -334,6 +335,13 @@
+    return (value & VIDEOOUT_ATTRIBUTE3_HIGH_FRAME_RATE) == VIDEOOUT_ATTRIBUTE3_HIGH_FRAME_RATE;
+ }
+ 
++static void
++radv_videoout_sleep_ms(unsigned milliseconds)
++{
++   struct timespec delay = {.tv_sec = milliseconds / 1000, .tv_nsec = (long)(milliseconds % 1000) * 1000000L};
++   nanosleep(&delay, NULL);
++}
++
+ /* The refresh period: the median of a few intervals between vblank waits,
+  * the first wait finding the phase. 0 when a wait fails. */
+ static uint64_t
+@@ -388,9 +396,23 @@
+             : -1;
+       out->high_frame_rate = supported > 0 && configured == 0;
+       if (out->high_frame_rate) {
+-         /* A period of 0 is a failed wait: never taken for 119.88 Hz */
+-         const uint64_t period = videoout_vblank_period_ns(out->handle);
+-         if (period == 0 || period > VIDEOOUT_HIGH_REFRESH_LIMIT_NS) {
++         /* A period of 0 is a failed wait: never taken for 119.88 Hz. The display may still be
++          * switching right after the configure (a TV renegotiating HDMI gave 20.9 ms, Portal 2 port,
++          * 2026-11-24): measured again for up to 2 s before the mode is given up. */
++         uint64_t period = videoout_vblank_period_ns(out->handle);
++         for (unsigned retry = 0; retry < 8 && period > VIDEOOUT_HIGH_REFRESH_LIMIT_NS; retry++) {
++            radv_videoout_sleep_ms(250);
++            period = videoout_vblank_period_ns(out->handle);
++         }
++         fprintf(stderr, "wsi/videoout: refresh period after 119.88 Hz: %.3f ms\n", (double)period / 1e6);
++         /* With variable refresh (the high-frame-rate mode on a VRR display), a display shown no
++          * flips refreshes at its floor, 48 Hz on the usual VRR range: a steady ~20.8 ms here is
++          * that idle floor, not a fallback to 60 Hz (16.7 ms). */
++         const bool vrr_floor = period > UINT64_C(19000000) && period < UINT64_C(21500000);
++         if (vrr_floor)
++            fprintf(stderr, "wsi/videoout: %.3f ms is a variable-refresh display idling at its floor: 119.88 Hz kept\n",
++                    (double)period / 1e6);
++         if (!vrr_floor && (period == 0 || period > VIDEOOUT_HIGH_REFRESH_LIMIT_NS)) {
+             sceVideoOutConfigureOutput(out->handle, PS5_VIDEO_OUT_MODE_RESTORE, NULL, NULL, NULL);
+             out->high_frame_rate = false;
+             if (period == 0)
+@@ -431,6 +453,23 @@
+    mtx_unlock(&videoout_output.lock);
+    return result;
+ }
++
++PUBLIC int wsi_videoout_refresh_millihertz(void);
++
++/* The output's refresh once VideoOut is open: 119880 in the high-frame-rate
++ * mode, 59940 otherwise; 0 before it is open. A title picks its flip rate
++ * from it (a 60 frames a second cap is rate 1 at 119.88 Hz, rate 0 at 59.94). */
++PUBLIC int
++wsi_videoout_refresh_millihertz(void)
++{
++   call_once(&videoout_once, videoout_output_init_once);
++   mtx_lock(&videoout_output.lock);
++   const int result = videoout_output.handle < 0 || !videoout_output.opened
++                         ? 0
++                         : videoout_output.high_frame_rate ? VIDEOOUT_HIGH_REFRESH_MILLIHERTZ : VIDEOOUT_REFRESH_MILLIHERTZ;
++   mtx_unlock(&videoout_output.lock);
++   return result;
++}
+ 
+ static void
+ videoout_settle_modes(void)
