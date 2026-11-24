@@ -392,8 +392,23 @@ int32_t __wrap_sceAgcSuspendPoint(void) {
     note_slow("sceAgcSuspendPoint", vk_now_ns() - start);
     return result;
 }
+// The thread recording command buffers (DXVK's command-stream worker): known from its first vkCmdDrawIndexed.
+typedef void (*VkDrawIndexedFn)(void *buffer, uint32_t indices, uint32_t instances, uint32_t first, int32_t offset, uint32_t first_instance);
+static VkDrawIndexedFn real_draw_indexed;
+static pthread_t record_thread;
+static _Atomic int have_record_thread;
+static void noted_draw_indexed(void *buffer, uint32_t indices, uint32_t instances, uint32_t first, int32_t offset, uint32_t first_instance) {
+    if (!have_record_thread) { record_thread = pthread_self(); have_record_thread = 1; }
+    real_draw_indexed(buffer, indices, instances, first, offset, first_instance);
+}
+int rt_ps5_vk_record_thread(pthread_t *thread) {
+    if (!have_record_thread) return 0;
+    *thread = record_thread;
+    return 1;
+}
 static void *interpose(const char *name, void *real) {
     if (!real) return NULL;
+    if (!strcmp(name, "vkCmdDrawIndexed")) { real_draw_indexed = (VkDrawIndexedFn)real; return (void *)noted_draw_indexed; }
     if (!strcmp(name, "vkQueueSubmit")) { real_submit = (VkSubmitFn)real; return (void *)timed_submit; }
     if (!strcmp(name, "vkQueuePresentKHR")) { real_present = (VkPresentFn)real; return (void *)timed_present; }
     return real;

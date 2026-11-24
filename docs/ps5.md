@@ -53,6 +53,7 @@ through the shell server and prints its log. On the console:
 | `trace.txt` | startup steps, frame pacing every 10 s, slow Vulkan calls, stall backtraces |
 | `args.txt` | extra game arguments, e.g. `+load <save>` or `+map <map>` |
 | `show_fps` | present: frame counter in the top left |
+| `fps60` | present: 60 frames a second, paced by the display (each frame shown for two refreshes at 119.88 Hz); checked every second, so it can be switched while the game runs. Needs the RADV with `wsi_videoout_refresh_millihertz` |
 | `screenshot.request` | present: the next frame is written to `screen.bmp` (`run_title.sh --shot`) |
 | `profile.request` | 10 s of instruction-address samples to `profile.txt` (`run_title.sh --profile`) |
 
@@ -67,6 +68,7 @@ through the shell server and prints its log. On the console:
   `MSG_DONTWAIT` (otherwise the engine's polled socket blocks the main thread).
 - The signal context has 48 more bytes before `uc_mcontext` than FreeBSD's.
 - Exit goes through `sceSystemServiceLoadExec("exit")`; returning from `main` crashes.
+- `clock_gettime` is not exported to titles: the link binds it to the platform layer's stand-in.
 
 ## Limits
 

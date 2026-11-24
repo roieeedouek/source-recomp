@@ -60,7 +60,10 @@ def main():
         named = [f for f in frames if f and not f.startswith(SKIP)]
         # The innermost frames are often system code (no symbols here): they count as "system" under the first named caller.
         first_named = next((i for i, f in enumerate(frames) if f and not f.startswith(SKIP)), None)
-        leading_system = first_named is not None and any(f is None for f in frames[3:first_named])
+        # Two-column profiles (instruction address, word on top of the stack): an unnamed first address is system code, the
+        # second its caller when it was a leaf (a system call stub). Older stack profiles start with the handler's frames.
+        start = 0 if len(stack) == 2 else 3
+        leading_system = first_named is not None and any(f is None for f in frames[start:first_named])
         top = named[0] if named else '(unknown)'
         self_counts[('[system] ' if leading_system else '') + top] += 1
         for name in set(named):

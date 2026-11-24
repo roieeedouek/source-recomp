@@ -7,6 +7,9 @@
 #include <stdint.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/time.h>
+#include <sys/mman.h>
+#include <sched.h>
 #include <stddef.h>
 #include <ucontext.h>
 #include <stdio.h>
@@ -156,9 +159,18 @@ speed_t cfgetispeed(const struct termios *t) { (void)t; return 0; }
 int backtrace(void **frames, int count);
 int main(int, char **);
 void rt_ps5_log_settle(void);
-static void fatal_signal(int signal_number) {
+static pthread_t title_main_thread;
+static void fatal_signal(int signal_number, siginfo_t *info, void *context) {
     void *frames[48];
     int count = backtrace(frames, 48);
+    // The backtrace stops at the signal frame: the faulting instruction and stack come from the context (the console's
+    // ucontext_t has uc_mcontext at 64, see profile_sample).
+    const char *registers = (const char *)context + 64;
+    uintptr_t rip = *(const uintptr_t *)(registers + offsetof(mcontext_t, mc_rip));
+    uintptr_t rsp = *(const uintptr_t *)(registers + offsetof(mcontext_t, mc_rsp));
+    fprintf(stderr, "\n=== fatal signal %d at rip %#lx (return %#lx), fault address %p, %s thread", signal_number,
+            (unsigned long)rip, rsp ? (unsigned long)*(const uintptr_t *)rsp : 0ul, info ? info->si_addr : NULL,
+            pthread_equal(pthread_self(), title_main_thread) ? "main" : "another");
     fprintf(stderr, "\n=== fatal signal %d, main at %p, %d frames:", signal_number, (void *)main, count);
     for (int i = 0; i < count; i++) fprintf(stderr, " %p", frames[i]);
     fprintf(stderr, "\n");
@@ -174,21 +186,26 @@ uint64_t rt_d3d9_presents(void);
 void rt_ps5_frame_stats_flush(void);
 extern _Atomic uint64_t rt_ps5_last_present_ns;
 int rt_ps5_vk_submit_thread(pthread_t *thread);
+int rt_ps5_vk_record_thread(pthread_t *thread);
 void rt_ps5_vk_flush(void);
-static pthread_t title_main_thread;
 static volatile int sample_is_hitch;
 // Profiling on request: SIGPROF records only the interrupted instruction address, from the signal context. No stack walk: a
 // backtrace taken from a signal in the middle of recompiled code crashed the game once (2026-11-24).
 #define PROFILE_SAMPLES 2000
-static uintptr_t profile_pcs[PROFILE_SAMPLES];
+static uintptr_t profile_pcs[PROFILE_SAMPLES], profile_tops[PROFILE_SAMPLES];
 static _Atomic unsigned profile_next;
 static void profile_sample(int signal, siginfo_t *info, void *context) {
     (void)signal; (void)info;
     unsigned slot = profile_next++;
     // The console's ucontext_t has 48 bytes more before uc_mcontext than FreeBSD's (the upstream SDK headers this is built
-    // with): uc_mcontext is at 64 (deps/ps5-vulkan-template's ps5platform/context.h).
-    if (slot < PROFILE_SAMPLES)
-        profile_pcs[slot] = *(const uintptr_t *)((const char *)context + 64 + offsetof(mcontext_t, mc_rip));
+    // with): uc_mcontext is at 64 (deps/ps5-vulkan-template's ps5platform/context.h). The word on top of the stack is kept
+    // too: inside a system call stub (no frame of its own) it is the caller's return address.
+    if (slot < PROFILE_SAMPLES) {
+        const char *registers = (const char *)context + 64;
+        profile_pcs[slot] = *(const uintptr_t *)(registers + offsetof(mcontext_t, mc_rip));
+        uintptr_t stack = *(const uintptr_t *)(registers + offsetof(mcontext_t, mc_rsp));
+        profile_tops[slot] = stack ? *(const uintptr_t *)stack : 0;
+    }
 }
 static void watchdog_sample(int signal) {
     (void)signal;
@@ -201,6 +218,27 @@ static void watchdog_sample(int signal) {
     for (int i = 0; i < count && length < (int)sizeof line - 20; i++) length += snprintf(line + length, sizeof line - length, " %lx", (unsigned long)(uintptr_t)frames[i]);
     rt_ps5_trace(line);
 }
+// 60 frames a second, while /data/portal2/fps60 exists (checked every second, so it can be switched while the game runs): each
+// frame stays on screen for two refreshes at 119.88 Hz (one at 59.94 Hz), paced by the display itself rather than by a timer
+// in the game. RADV's video output (patched deps/ps5-vulkan RADV) does the flipping.
+// Weak: wsi_videoout_refresh_millihertz is a local addition to that RADV; without it the switch does nothing.
+__attribute__((weak)) int wsi_videoout_set_flip_rate(int rate);
+__attribute__((weak)) int wsi_videoout_refresh_millihertz(void);
+static void frame_cap_poll(void) {
+    static int applied = -1;   // flip rate in force, -1 before the output is open
+    if (!wsi_videoout_set_flip_rate || !wsi_videoout_refresh_millihertz) return;
+    int refresh = wsi_videoout_refresh_millihertz();
+    if (!refresh) return;
+    int wanted = !access("/data/portal2/fps60", F_OK) && refresh > 100000 ? 1 : 0;
+    if (wanted == applied) return;
+    int result = wsi_videoout_set_flip_rate(wanted);
+    char note[120];
+    snprintf(note, sizeof note, "frame cap: %s (refresh %.2f Hz, flip rate %d, answer %d)", wanted ? "60 fps" : "off",
+             refresh / 1000.0, wanted, result);
+    rt_ps5_trace(note);
+    applied = wanted;
+}
+
 static void *watchdog(void *unused) {
     (void)unused;
     // Once a second: the frame statistics and slow Vulkan calls to the trace; every 15 s, a stall (no frame at all) has the main
@@ -210,6 +248,7 @@ static void *watchdog(void *unused) {
         sleep(1);
         rt_ps5_frame_stats_flush();
         rt_ps5_vk_flush();
+        frame_cap_poll();
         // /data/portal2/profile.request (tools/ps5/run_title.sh --profile): the main thread's instruction address every 5 ms for
         // 10 s, or the GPU-submission thread's when the file says "submit"; one address a line in /data/portal2/profile.txt.
         if (!access("/data/portal2/profile.request", F_OK)) {
@@ -219,14 +258,15 @@ static void *watchdog(void *unused) {
             unlink("/data/portal2/profile.request");
             pthread_t target = title_main_thread;
             int submit = !strncmp(what, "submit", 6) && rt_ps5_vk_submit_thread(&target);
+            int record = !submit && !strncmp(what, "record", 6) && rt_ps5_vk_record_thread(&target);
             profile_next = 0;
             for (int i = 0; i < PROFILE_SAMPLES; ++i) { pthread_kill(target, SIGPROF); usleep(5000); }
             usleep(20000);
             unsigned taken = profile_next < PROFILE_SAMPLES ? profile_next : PROFILE_SAMPLES;
             FILE *out = fopen("/data/portal2/profile.tmp", "w");
             if (out) {
-                fprintf(out, "profile: %s thread, main at %p, %u samples\n", submit ? "submit" : "main", (void *)main, taken);
-                for (unsigned i = 0; i < taken; ++i) fprintf(out, "%lx\n", (unsigned long)profile_pcs[i]);
+                fprintf(out, "profile: %s thread, main at %p, %u samples\n", submit ? "submit" : record ? "record" : "main", (void *)main, taken);
+                for (unsigned i = 0; i < taken; ++i) fprintf(out, "%lx %lx\n", (unsigned long)profile_pcs[i], (unsigned long)profile_tops[i]);
                 fclose(out);
                 rename("/data/portal2/profile.tmp", "/data/portal2/profile.txt");
             }
@@ -252,11 +292,41 @@ __attribute__((constructor(102))) static void install_crash_log(void) {
     setenv("DXVK_LOG_PATH", "/data/portal2/tmp", 0);
     // No system fonts: tools/ps5/fonts.conf (the game's own fonts and the family aliases VGUI uses).
     if (!access("/data/portal2/fonts.conf", R_OK)) setenv("FONTCONFIG_FILE", "/data/portal2/fonts.conf", 0);
+    // Per-import guest call counts, to the log every 10 s (runtime/rt.c), while this file exists.
+    if (!access("/data/portal2/import_counts", F_OK)) setenv("P2_IMPORT_COUNTS", "1", 0);
+    // The guest lock's wait time on the main thread, to the log every 5 s (runtime/scheduler.c), while this file exists.
+    if (!access("/data/portal2/gate_timing", F_OK)) setenv("P2_GATE_TIMING", "1", 0);
     // Frame counter (runtime/fps_overlay.c, top left) while /data/portal2/show_fps exists.
     if (!access("/data/portal2/show_fps", F_OK)) setenv("P2_FPS", "1", 0);
     static const int fatal[] = {SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE};
-    for (unsigned i = 0; i < sizeof fatal / sizeof *fatal; i++) signal(fatal[i], fatal_signal);
+    struct sigaction fatal_action = {0};
+    fatal_action.sa_sigaction = fatal_signal;
+    fatal_action.sa_flags = SA_SIGINFO;
+    sigemptyset(&fatal_action.sa_mask);
+    for (unsigned i = 0; i < sizeof fatal / sizeof *fatal; i++) sigaction(fatal[i], &fatal_action, NULL);
     title_main_thread = pthread_self();
+    {
+        // Where the console's library functions are (taking an imported function's address reads its resolved entry): the
+        // system's libraries have no symbols here, and a profile's system addresses are named against these.
+        static const struct { const char *name; void *address; } known[] = {
+            {"clock_gettime", (void *)clock_gettime}, {"gettimeofday", (void *)gettimeofday}, {"nanosleep", (void *)nanosleep},
+            {"usleep", (void *)usleep}, {"sched_yield", (void *)sched_yield}, {"pthread_mutex_lock", (void *)pthread_mutex_lock},
+            {"pthread_mutex_unlock", (void *)pthread_mutex_unlock}, {"pthread_mutex_trylock", (void *)pthread_mutex_trylock},
+            {"pthread_cond_wait", (void *)pthread_cond_wait}, {"pthread_cond_timedwait", (void *)pthread_cond_timedwait},
+            {"pthread_cond_signal", (void *)pthread_cond_signal}, {"pthread_cond_broadcast", (void *)pthread_cond_broadcast},
+            {"pthread_self", (void *)pthread_self}, {"pthread_getspecific", (void *)pthread_getspecific},
+            {"pthread_setspecific", (void *)pthread_setspecific}, {"read", (void *)read}, {"write", (void *)write},
+            {"open", (void *)open}, {"close", (void *)close}, {"lseek", (void *)lseek}, {"fstat", (void *)fstat},
+            {"stat", (void *)stat}, {"access", (void *)access}, {"mmap", (void *)mmap}, {"munmap", (void *)munmap},
+            {"mprotect", (void *)mprotect}, {"getpid", (void *)getpid}, {"sigprocmask", (void *)sigprocmask},
+            {"pthread_sigmask", (void *)pthread_sigmask}, {"malloc", (void *)malloc}, {"free", (void *)free},
+        };
+        for (unsigned i = 0; i < sizeof known / sizeof *known; ++i) {
+            char note[96];
+            snprintf(note, sizeof note, "symbol: %p %s", known[i].address, known[i].name);
+            rt_ps5_trace(note);
+        }
+    }
     struct sigaction action = {0};
     action.sa_handler = watchdog_sample;
     action.sa_flags = SA_RESTART;
