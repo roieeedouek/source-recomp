@@ -1,13 +1,10 @@
-// PS5 (Prospero) host layer: guest address window and main thread.
+// PS5 (Prospero) host layer for the native title (tools/ps5/build_title.sh, docs/ps5.md): guest address window, standard
+// error, Vulkan entry point and dl* for a title that cannot load libraries.
 //
-// The console hands a title only ~440 MiB of "flexible" memory for anonymous
-// mmap, far less than the guest needs. The guest window (4 GiB of address
-// space, rt.c) is therefore only *reserved* here, and each 2 MiB chunk is
-// backed with direct memory the first time rt_map/rt_mmap commits it. This
-// follows the memory model proven by prospero-win (wine/ps5/pw_wine_dmem_ps5.c,
-// LGPL-2.1+): reserve with sceKernelReserveVirtualRange, back with
-// sceKernelMapDirectMemory, change protection with sceKernelMprotect.
-// Not yet run on hardware (see docs/ps5.md).
+// The guest window (4 GiB of address space, rt.c) is reserved here and each 2 MiB chunk is backed with direct memory the first
+// time rt_map/rt_mmap commits it (a title gets ~12 GiB of direct memory but only ~420 MiB of flexible memory). This follows the
+// memory model proven by prospero-win (wine/ps5/pw_wine_dmem_ps5.c, LGPL-2.1+): reserve with sceKernelReserveVirtualRange, back
+// with sceKernelMapDirectMemory, change protection with sceKernelMprotect.
 #ifdef __PROSPERO__
 #include "rt.h"
 #include <pthread.h>
@@ -29,7 +26,6 @@ extern int sceKernelAllocateMainDirectMemory(size_t bytes, size_t alignment, int
 extern size_t sceKernelGetDirectMemorySize(void);
 extern int sceKernelAvailableDirectMemorySize(int64_t start, int64_t end, size_t alignment, int64_t *address, size_t *bytes);
 extern size_t sceKernelAvailableFlexibleMemorySize(size_t *bytes);
-extern int sceKernelMapNamedFlexibleMemory(void **address, size_t bytes, int protection, int flags, const char *name);
 extern int sceKernelMapDirectMemory(void **address, size_t bytes, int protection, int flags, int64_t offset, size_t alignment);
 
 enum {
@@ -52,7 +48,6 @@ void rt_ps5_notify(const char *text) {
     sceKernelSendNotificationRequest(0, &r, sizeof r, 0);
 }
 
-#ifdef RT_PS5_TITLE
 void rt_ps5_trace(const char *text);
 // Standard error, asynchronously: text for stderr goes into this ring and a thread of its own writes it to the log file, so a
 // writer never waits on the console's storage. (A pipe was tried first: pipe() is refused in a title.) When the ring is full,
@@ -150,21 +145,13 @@ void rt_ps5_log_settle(void) {
     }
     usleep(20000);
 }
-#endif
 
-#ifdef RT_PS5_TITLE
 extern void platform_init(const char *title_name);
-#endif
 static pthread_t main_thread;
 // Runs before main (priority 101): notification at startup, stderr to a file so failures can be read back.
 __attribute__((constructor(101))) static void remember_main_thread(void) {
     main_thread = pthread_self();
-#ifdef RT_PS5_TITLE
     platform_init("Portal 2");   // the console glue (deps/ps5-doom3/ps5/src/platform.c): klog, the shell's splash, the pad
-#else
-    rt_ps5_notify("portal2: payload started");
-    setenv("SDL_VULKAN_LIBRARY", "/data/portal2/lib/libvulkan.so.1", 0);
-#endif
     mkdir("/data/portal2/tmp", 0777);
     mkdir("/data/portal2/user", 0777);
     mkdir("/data/portal2/user/dxvk-cache", 0777);
@@ -179,7 +166,6 @@ __attribute__((constructor(101))) static void remember_main_thread(void) {
     setvbuf(stderr, NULL, _IONBF, 0);
     dup2(fileno(stderr), 1);   // stdout into the same file, unbuffered: it is lost when the process dies otherwise
     setvbuf(stdout, NULL, _IONBF, 0);
-#ifdef RT_PS5_TITLE
     // Save folders made 0744 by earlier builds (runtime/posix.c now makes them 0777): only this process's user may open them up.
     {
         static const char save_root[] = "/data/portal2/user/portal2/SAVE";
@@ -207,7 +193,6 @@ __attribute__((constructor(101))) static void remember_main_thread(void) {
         snprintf(note, sizeof note, "log: no log thread (file %d, errno %d), standard error is written directly", log_file, errno);
         rt_ps5_trace(note);
     }
-#endif
 }
 // Progress trace independent of stdio: klog and /data/portal2/trace.txt (one write() per line, appended).
 extern int sceKernelDebugOutText(int channel, const char *text);
@@ -225,14 +210,7 @@ static uint8_t *window;                    // base of the reserved guest window
 static uint8_t backed[MAX_CHUNKS];
 static int map_protection = CPU_READ_WRITE;
 static int memory_type = MEMORY_TYPE;   // switched if the console refuses it
-static unsigned backed_chunks, flexible_chunks;
-#ifdef RT_PS5_TITLE
-// A title gets ~12 GiB of direct memory but only ~420 MiB of flexible memory (measured, tools/ps5/title_mem_probe.c): the guest
-// window is backed by direct memory from the start, leaving flexible memory to the platform's own use.
-static int flexible_refused = 1;
-#else
-static int flexible_refused;
-#endif
+static unsigned backed_chunks;
 
 // Reserves `bytes` of address space; returns the base or NULL.
 void *rt_ps5_reserve(size_t bytes) {
@@ -252,16 +230,6 @@ int rt_ps5_commit(uint32_t address, uint64_t size) {
     uint64_t first = address / CHUNK, last = ((uint64_t)address + size + CHUNK - 1) / CHUNK;
     for (uint64_t chunk = first; chunk < last && chunk < MAX_CHUNKS; ++chunk) {
         if (backed[chunk]) continue;
-        // Flexible memory first: this console reports ~8 GiB of it free to a payload but only ~54 MiB of main direct memory,
-        // which the GPU driver needs more than the guest does.
-        if (!flexible_refused) {
-            void *flex = window + chunk * CHUNK;
-            int frc = sceKernelMapNamedFlexibleMemory(&flex, CHUNK, CPU_READ_WRITE, KERNEL_FIXED, "p2guest");
-            if (!frc && flex == window + chunk * CHUNK) { backed[chunk] = 1; ++backed_chunks; ++flexible_chunks; continue; }
-            fprintf(stderr, "ps5: flexible map refused at guest %#llx (%#x) after %u flexible chunks; using direct memory\n",
-                    (unsigned long long)(chunk * CHUNK), (unsigned)frc, flexible_chunks);
-            flexible_refused = 1;
-        }
         int64_t offset = 0;
         int rc = sceKernelAllocateMainDirectMemory(CHUNK, PS5_PAGE, memory_type, &offset);
         if (rc) {   // other memory types before giving up (0x0c is prospero-win's; the pool rules are not documented)
@@ -325,120 +293,9 @@ int rt_towlower_l(int c, locale_t locale) { (void)locale; return case_map(c, 0);
 // Apple-only GL extensions used by the OpenGL path of gl.c: no-ops here (Direct3D 9 via DXVK is the renderer).
 __attribute__((weak)) void glBufferParameteriAPPLE(unsigned target, unsigned pname, int param) { (void)target; (void)pname; (void)param; }
 __attribute__((weak)) void glFlushMappedBufferRangeAPPLE(unsigned target, long offset, long size) { (void)target; (void)offset; (void)size; }
-#ifdef RT_PS5_TITLE
 // A title has no Vulkan loader: RADV is linked into the executable and its entry point is vk_icdGetInstanceProcAddr.
 extern void *vk_icdGetInstanceProcAddr(void *instance, const char *name);
-// Frame-pacing diagnostics: vkQueueSubmit and vkQueuePresentKHR are interposed (DXVK gets every function through here) to time
-// each call and remember the thread that submits. A call over 20 ms is noted (written to the trace once a second by the
-// watchdog thread, rt_ps5_vk_flush) and the submitting thread can be sampled during a hitch (ps5_title.c).
-typedef int32_t (*VkSubmitFn)(void *queue, uint32_t count, const void *submits, uint64_t fence);
-typedef int32_t (*VkPresentFn)(void *queue, const void *info);
-typedef void *(*VkDeviceProcFn)(void *device, const char *name);
-static VkSubmitFn real_submit;
-static VkPresentFn real_present;
-static VkDeviceProcFn real_device_proc;
-static pthread_t submit_thread;
-static _Atomic int have_submit_thread;
-static char slow_notes[8][96];
-static _Atomic unsigned slow_written, slow_read;
-static uint64_t vk_now_ns(void) {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
-}
-static void note_slow(const char *call, uint64_t ns) {
-    if (ns < 20000000u) return;
-    unsigned slot = slow_written;
-    if (slot - slow_read >= 8) return;   // the watchdog has not caught up: dropped
-    snprintf(slow_notes[slot % 8], sizeof slow_notes[0], "vulkan: %s took %.1f ms", call, (double)ns / 1e6);
-    slow_written = slot + 1;
-}
-void rt_ps5_vk_flush(void) {
-    while (slow_read != slow_written) {
-        rt_ps5_trace(slow_notes[slow_read % 8]);
-        slow_read = slow_read + 1;
-    }
-}
-int rt_ps5_vk_submit_thread(pthread_t *thread) {
-    if (!have_submit_thread) return 0;
-    *thread = submit_thread;
-    return 1;
-}
-static int32_t timed_submit(void *queue, uint32_t count, const void *submits, uint64_t fence) {
-    if (!have_submit_thread) { submit_thread = pthread_self(); have_submit_thread = 1; }
-    uint64_t start = vk_now_ns();
-    int32_t result = real_submit(queue, count, submits, fence);
-    note_slow("vkQueueSubmit", vk_now_ns() - start);
-    return result;
-}
-static int32_t timed_present(void *queue, const void *info) {
-    uint64_t start = vk_now_ns();
-    int32_t result = real_present(queue, info);
-    note_slow("vkQueuePresentKHR", vk_now_ns() - start);
-    return result;
-}
-// The console's own submission calls, under RADV's (tools/ps5/build_title.sh: --wrap): which part of a slow vkQueueSubmit stalls.
-int32_t __real_sceAgcDriverSubmitDcb(void *description);
-int32_t __wrap_sceAgcDriverSubmitDcb(void *description) {
-    uint64_t start = vk_now_ns();
-    int32_t result = __real_sceAgcDriverSubmitDcb(description);
-    note_slow("sceAgcDriverSubmitDcb", vk_now_ns() - start);
-    return result;
-}
-int32_t __real_sceAgcSuspendPoint(void);
-int32_t __wrap_sceAgcSuspendPoint(void) {
-    uint64_t start = vk_now_ns();
-    int32_t result = __real_sceAgcSuspendPoint();
-    note_slow("sceAgcSuspendPoint", vk_now_ns() - start);
-    return result;
-}
-// The thread recording command buffers (DXVK's command-stream worker): known from its first vkCmdDrawIndexed.
-typedef void (*VkDrawIndexedFn)(void *buffer, uint32_t indices, uint32_t instances, uint32_t first, int32_t offset, uint32_t first_instance);
-static VkDrawIndexedFn real_draw_indexed;
-static pthread_t record_thread;
-static _Atomic int have_record_thread;
-static void noted_draw_indexed(void *buffer, uint32_t indices, uint32_t instances, uint32_t first, int32_t offset, uint32_t first_instance) {
-    if (!have_record_thread) { record_thread = pthread_self(); have_record_thread = 1; }
-    real_draw_indexed(buffer, indices, instances, first, offset, first_instance);
-}
-int rt_ps5_vk_record_thread(pthread_t *thread) {
-    if (!have_record_thread) return 0;
-    *thread = record_thread;
-    return 1;
-}
-static void *interpose(const char *name, void *real) {
-    if (!real) return NULL;
-    if (!strcmp(name, "vkCmdDrawIndexed")) { real_draw_indexed = (VkDrawIndexedFn)real; return (void *)noted_draw_indexed; }
-    if (!strcmp(name, "vkQueueSubmit")) { real_submit = (VkSubmitFn)real; return (void *)timed_submit; }
-    if (!strcmp(name, "vkQueuePresentKHR")) { real_present = (VkPresentFn)real; return (void *)timed_present; }
-    return real;
-}
-static void *device_proc(void *device, const char *name) { return interpose(name, real_device_proc(device, name)); }
-void *vkGetInstanceProcAddr(void *instance, const char *name) {
-    void *real = vk_icdGetInstanceProcAddr(instance, name);
-    if (real && !strcmp(name, "vkGetDeviceProcAddr")) { real_device_proc = (VkDeviceProcFn)real; return (void *)device_proc; }
-    return interpose(name, real);
-}
-#else
-// Vulkan is not a load-time dependency: the console's loader cannot resolve libvulkan.so.1 by name, but dlopen by path works.
-// DXVK's loader calls vkGetInstanceProcAddr directly; this resolves it from the library on first use.
-#include <dlfcn.h>
-#include <stdlib.h>
-#ifndef RT_PS5_VULKAN
-#define RT_PS5_VULKAN "/data/portal2/lib/libvulkan.so.1"
-#endif
-void *vkGetInstanceProcAddr(void *instance, const char *name) {
-    static void *(*real)(void *, const char *);
-    if (!real) {
-        void *library = dlopen(RT_PS5_VULKAN, RTLD_NOW | RTLD_GLOBAL);
-        if (!library) { fprintf(stderr, "ps5: dlopen(%s): %s\n", RT_PS5_VULKAN, dlerror()); rt_ps5_notify("portal2: cannot load libvulkan"); return NULL; }
-        real = (void *(*)(void *, const char *))dlsym(library, "vkGetInstanceProcAddr");
-        if (!real) { fprintf(stderr, "ps5: vkGetInstanceProcAddr missing\n"); return NULL; }
-    }
-    return real(instance, name);
-}
-#endif
-#ifdef RT_PS5_TITLE
+void *vkGetInstanceProcAddr(void *instance, const char *name) { return vk_icdGetInstanceProcAddr(instance, name); }
 // A title cannot dlopen anything (the console's loader answers NULL for every module): the three libraries the game asks for
 // are all inside the executable. dlopen(NULL) / "@self" is the executable (the offline Steam stub is looked up there, from a table
 // tools/ps5/gen_dl_table.py writes at link time); a path naming Vulkan is RADV. Everything else fails with a message.
@@ -468,34 +325,4 @@ void *__wrap_dlsym(void *handle, const char *name) {
 }
 char *__wrap_dlerror(void) { const char *error = dl_error; dl_error = NULL; return (char *)error; }
 int __wrap_dlclose(void *handle) { (void)handle; return 0; }
-#else
-// dl* inside the game library. The SDK's libc.a defines dlopen/dlsym (dlfcn.o), so each ELF that links it carries its own copy
-// with its own state: the copy inside this library does not know the libvulkan the launcher already loaded, and its dlopen
-// returns NULL without an error text. The library is linked with --wrap=dlopen/dlsym/dlerror/dlclose (tools/build_game.py), and the
-// launcher registers its own functions through rt_ps5_set_dl() before main runs. Without a launcher the real ones are used.
-typedef void *(*dlopen_fn)(const char *, int);
-typedef void *(*dlsym_fn)(void *, const char *);
-typedef char *(*dlerror_fn)(void);
-typedef int (*dlclose_fn)(void *);
-extern void *__real_dlopen(const char *, int);
-extern void *__real_dlsym(void *, const char *);
-extern char *__real_dlerror(void);
-extern int __real_dlclose(void *);
-static dlopen_fn launcher_dlopen;
-static dlsym_fn launcher_dlsym;
-static dlerror_fn launcher_dlerror;
-static dlclose_fn launcher_dlclose;
-void rt_ps5_set_dl(dlopen_fn open, dlsym_fn symbol, dlerror_fn error, dlclose_fn close) {
-    launcher_dlopen = open; launcher_dlsym = symbol; launcher_dlerror = error; launcher_dlclose = close;
-}
-void *__wrap_dlopen(const char *path, int mode) {
-    void *handle = (launcher_dlopen ? launcher_dlopen : __real_dlopen)(path, mode);
-    char *error = handle ? NULL : (launcher_dlerror ? launcher_dlerror : __real_dlerror)();
-    fprintf(stderr, "ps5: dlopen(%s, %#x) -> %p%s%s\n", path ? path : "(null)", mode, handle, error ? " " : "", error ? error : "");
-    return handle;
-}
-void *__wrap_dlsym(void *handle, const char *name) { return (launcher_dlsym ? launcher_dlsym : __real_dlsym)(handle, name); }
-char *__wrap_dlerror(void) { return (launcher_dlerror ? launcher_dlerror : __real_dlerror)(); }
-int __wrap_dlclose(void *handle) { return (launcher_dlclose ? launcher_dlclose : __real_dlclose)(handle); }
-#endif
 #endif

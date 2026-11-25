@@ -35,9 +35,14 @@ Cloned next to the checkout, in `../deps/`:
 ```sh
 python3 tools/gameprep.py                                   # prep (once)
 tools/ps5/build_title_deps.sh                               # SDL2 + console glue
-python3 tools/build_game.py --target ps5 --release --title  # lift and compile; writes build/game/link.rsp
+python3 tools/build_game.py --target ps5 --release          # lift and compile; writes build/game/link.rsp
 tools/ps5/build_title.sh                                    # link the title: build/ps5-title-game/PPSA97622
 ```
+
+Package for installing (no game files: the player adds their own, see README.md, "PlayStation 5"):
+`python3 tools/ps5/package_title.py` writes `build/ps5-release/portal2-ps5-<version>.zip` with the title,
+the `/data/portal2` support files, the game binaries' checksums and `check_game.py`. `--with-art` adds
+`build/ps5-art` (artwork from screenshots, for your own use).
 
 Profile-guided optimization (about 13% faster on the console): build the Linux host version with
 `--release --pgo-generate`, play a level with `LLVM_PROFILE_FILE=…/portal2-%p.profraw`, merge with

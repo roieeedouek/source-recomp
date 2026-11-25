@@ -31,6 +31,7 @@ share them.
 | **See what works** | [Status](#status) · [Roadmap and limits](#roadmap-and-limits) |
 | **Play on a Mac** | [Quick start](#quick-start-mac) · [Full install](#install-on-mac) |
 | **Play on an iPhone** | [Install on iPhone](#install-on-iphone) |
+| **Play on a PS5** | [PlayStation 5](#playstation-5-experimental) |
 | **Fix a problem** | [Troubleshooting](#troubleshooting) |
 | **Understand the project** | [How it works](#how-it-works) · [Documentation](#documentation) |
 | **Help** | [Contributing](#contributing) · [Development and tests](#development-and-tests) |
@@ -360,6 +361,81 @@ its own build folder (`build/portal1`). It creates
 
 Details, manual setup and what differs from Portal 2:
 [docs/portal1.md](docs/portal1.md).
+
+## PlayStation 5 (experimental)
+
+Portal 2 also runs on a **jailbroken PS5** as a native homebrew title: the same
+recompiled game, built on a Linux PC for the console's CPU, rendering through
+DXVK and the console's Vulkan driver (RADV). **You must own Portal 2**: as for
+the Mac, nothing from Valve is in this repository, and a build contains
+Valve's game, so keep it for yourself.
+
+- **Tested** on firmware 13.60 with a homebrew title launcher (ShadowMountPlus),
+  an FTP server and a shell server: the menu, the story chapters played through
+  several chambers, saving and loading, the controller.
+- **Display**: 3840x2160 at 119.88 Hz where the TV takes it (with variable
+  refresh), 86–96 fps in busy chambers; an optional, display-paced 60 fps lock.
+- **Not yet**: co-op, the Workshop, a full playthrough on the console. The
+  recompiled game runs one game thread at a time, which limits the frame rate
+  (`docs/parallel-guest-plan.md`, branch `parallel-guest`).
+
+### Build it (Linux PC)
+
+You need an x86-64 Linux machine (tested: Ubuntu under WSL2) with Python 3,
+clang 18, git, cmake, ninja and meson, the Linux files of Portal 2 (see
+[What you need](#what-you-need)), and the console toolchain and libraries
+cloned next to this checkout, in `../deps/`: the payload SDK, `ps5-vulkan`
+(RADV for the console, with `tools/ps5/patches/radv-videoout-120hz.patch`
+applied), DXVK Native, SDL2 with the console's drivers. `docs/ps5.md` lists
+them and how each is built. Then:
+
+```sh
+python3 tools/gameprep.py                       # prepare the game's Linux libraries (build/game/prep)
+tools/ps5/build_title_deps.sh                   # SDL2 and the console glue
+python3 tools/build_game.py --target ps5 --release
+tools/ps5/build_title.sh                        # the title: build/ps5-title-game/PPSA97622
+python3 tools/ps5/package_title.py              # a package to install: build/ps5-release/*.zip
+```
+
+The first `build_game.py` takes about an hour. A profile-guided build runs
+about 13% faster (`docs/ps5.md`, "Build").
+
+### Install a package
+
+A package (`tools/ps5/package_title.py`, above) holds the title, a few support
+files and the fingerprints of the game binaries it was built from; **no game
+files**. It only runs with exactly those binaries, so first check your copy:
+
+1. `python3 check_game.py "<your Portal 2 folder>"` (from the package).
+2. In a clone of this repository, set `linux_root` and `game_root` in
+   `config/local.json` to your Portal 2 folder, then run
+   `python3 tools/gameprep.py`: it writes `build/game/prep`.
+3. Copy to the console over FTP, keeping the folder names:
+
+   | From | To |
+   |---|---|
+   | the package's `homebrew/PPSA97622` | `/data/homebrew/PPSA97622` |
+   | your Portal 2 folder | `/data/portal2/game` |
+   | `build/game/prep` | `/data/portal2/prep` |
+   | the package's `portal2/*` | `/data/portal2/` |
+
+4. Make `/data/homebrew/PPSA97622/eboot.bin` executable (`chmod 755` from the
+   shell server or your FTP client), register the title with your launcher,
+   and start **Portal 2 (source-recomp)**.
+
+Saves, settings and the shader caches go to `/data/portal2/user`; the log is
+`/data/portal2/log.txt`.
+
+### Options (files in `/data/portal2`)
+
+| File | Effect |
+|---|---|
+| `fps60` (in the package) | 60 fps, paced by the display; checked every second, delete it to unlock |
+| `show_fps` | frame counter in the top left |
+| `args.txt` | extra game arguments, e.g. `+load <save name>` to start in a save |
+
+Building, the console specifics and the tools that upload, launch, screenshot
+and profile the game over the network: [docs/ps5.md](docs/ps5.md).
 
 ## Troubleshooting
 

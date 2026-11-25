@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Links Portal 2 as a native PS5 title: build/ps5-title-game/<TITLE_ID>/ (eboot.bin, sce_sys, sce_module).
 #   tools/ps5/build_title.sh [TITLE_ID]
-# Needs: python3 tools/build_game.py --target ps5 --release --title (the object list, build/game/link.rsp),
+# Needs: python3 tools/build_game.py --target ps5 --release (the object list, build/game/link.rsp),
 #        tools/ps5/build_title_deps.sh (SDL2 + console glue), deps/ps5-vulkan bootstrapped, LLD 22 shim (docs/ps5.md).
 set -euo pipefail
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -36,7 +36,7 @@ PY
 
 # libc names the title's imports cannot reach: Doom 3's shims.c answers them as ps5dl_<name> (kept local), see title_link notes
 shims=(isatty getresuid getresgid dl_iterate_phdr fchown fork vfork setsid pathconf getnameinfo gai_strerror lstat clock_gettime execlp execl strsignal fnmatch gethostbyname realpath)
-flags=(--wrap=fprintf --wrap=vfprintf --wrap=fputs --wrap=fputc --wrap=fwrite --wrap=sceAgcDriverSubmitDcb --wrap=sceAgcSuspendPoint --wrap=dlopen --wrap=dlsym --wrap=dlerror --wrap=dlclose --error-limit=0)
+flags=(--wrap=fprintf --wrap=vfprintf --wrap=fputs --wrap=fputc --wrap=fwrite --wrap=dlopen --wrap=dlsym --wrap=dlerror --wrap=dlclose --error-limit=0)
 for name in "${shims[@]}"; do flags+=("--defsym=$name=ps5dl_$name"); done
 # (chown/lchown/gl*: runtime/ps5_title.c and ps5_gl_stub.c define names the stub libraries also define: kept local, the converter refuses exports)
 # and the platform layer's own ps5_<name> the recipe does not bind (SDK pin 611893f)
@@ -50,7 +50,7 @@ if [[ ${PS5_PGO_GENERATE:-0} == 1 ]]; then
 fi
 flags+=(--defsym=towupper_l=rt_towupper_l --defsym=towlower_l=rt_towlower_l --defsym=readlink=rt_title_readlink --defsym=chdir=rt_title_chdir --defsym=getcwd=rt_title_getcwd)   # runtime/ps5_title.c: /proc/self/exe is /app0/eboot.bin; PS5_UNBIND drops the recipe's own bind
 for name in "${platform_names[@]}"; do flags+=("--defsym=$name=ps5_$name"); done
-{ printf '{\n    local:\n'; printf '        %s;\n' "${shims[@]}" "${platform_names[@]}" chown lchown readlink towupper_l towlower_l rt_towupper_l rt_towlower_l "${pgo_local[@]}" rt_title_readlink __wrap_sceAgcDriverSubmitDcb __wrap_sceAgcSuspendPoint __wrap_fprintf __wrap_vfprintf __wrap_fputs __wrap_fputc __wrap_fwrite chdir getcwd rt_title_chdir rt_title_getcwd 'gl*'; printf '};\n'; } > "$work/shims-local.map"
+{ printf '{\n    local:\n'; printf '        %s;\n' "${shims[@]}" "${platform_names[@]}" chown lchown readlink towupper_l towlower_l rt_towupper_l rt_towlower_l "${pgo_local[@]}" rt_title_readlink __wrap_fprintf __wrap_vfprintf __wrap_fputs __wrap_fputc __wrap_fwrite chdir getcwd rt_title_chdir rt_title_getcwd 'gl*'; printf '};\n'; } > "$work/shims-local.map"
 flags+=(--version-script "$work/shims-local.map")
 
 # Title artwork: build/ps5-art (tools/ps5/make_title_art.py: icon0.png, pic0.dds, pic1.dds) when it exists, else the

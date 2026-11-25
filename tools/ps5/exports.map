@@ -1,9 +1,0 @@
-{
-  global:
-    main;
-    vkGetInstanceProcAddr;
-    rt_ps5_set_dl;
-    Steam*;
-  local:
-    *;
-};

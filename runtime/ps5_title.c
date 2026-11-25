@@ -1,7 +1,7 @@
 // libc names a native PS5 title cannot import: no module a title loads exports them, so the first call would jump to address 0.
 // The libraries linked in (fontconfig, freetype, SDL) reference them; these are small stand-ins for the C locale and the
-// console's file system (a title's temporary files live in /data/portal2/tmp). Only for title builds (RT_PS5_TITLE).
-#if defined(__PROSPERO__) && defined(RT_PS5_TITLE)
+// console's file system (a title's temporary files live in /data/portal2/tmp).
+#ifdef __PROSPERO__
 #include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -185,10 +185,6 @@ void rt_ps5_trace(const char *text);
 uint64_t rt_d3d9_presents(void);
 void rt_ps5_frame_stats_flush(void);
 extern _Atomic uint64_t rt_ps5_last_present_ns;
-int rt_ps5_vk_submit_thread(pthread_t *thread);
-int rt_ps5_vk_record_thread(pthread_t *thread);
-void rt_ps5_vk_flush(void);
-static volatile int sample_is_hitch;
 // Profiling on request: SIGPROF records only the interrupted instruction address, from the signal context. No stack walk: a
 // backtrace taken from a signal in the middle of recompiled code crashed the game once (2026-11-24).
 #define PROFILE_SAMPLES 2000
@@ -212,8 +208,8 @@ static void watchdog_sample(int signal) {
     void *frames[40];
     int count = backtrace(frames, 40);
     char line[1200];
-    int length = snprintf(line, sizeof line, "%s: main at %p, %s, presents %llu, %d frames:", sample_is_hitch ? "hitch" : "watchdog",
-                          (void *)main, pthread_equal(pthread_self(), title_main_thread) ? "main thread" : "vulkan submit thread",
+    int length = snprintf(line, sizeof line, "stall: main at %p, %s, presents %llu, %d frames:",
+                          (void *)main, pthread_equal(pthread_self(), title_main_thread) ? "main thread" : "other thread",
                           (unsigned long long)rt_d3d9_presents(), count);
     for (int i = 0; i < count && length < (int)sizeof line - 20; i++) length += snprintf(line + length, sizeof line - length, " %lx", (unsigned long)(uintptr_t)frames[i]);
     rt_ps5_trace(line);
@@ -242,30 +238,27 @@ static void frame_cap_poll(void) {
 static void *watchdog(void *unused) {
     (void)unused;
     // Once a second: the frame statistics and slow Vulkan calls to the trace; every 15 s, a stall (no frame at all) has the main
-    // thread sampled. (A 2 ms hitch poller found RADV's statistics print, 2026-11-24; it cost a core's wakeups, so it is gone.)
+    // thread sampled (its stack to the trace: where a hang sits).
     uint64_t last = 0;
     for (unsigned tick = 1;; ++tick) {
         sleep(1);
         rt_ps5_frame_stats_flush();
-        rt_ps5_vk_flush();
         frame_cap_poll();
         // /data/portal2/profile.request (tools/ps5/run_title.sh --profile): the main thread's instruction address every 5 ms for
-        // 10 s, or the GPU-submission thread's when the file says "submit"; one address a line in /data/portal2/profile.txt.
+        // 10 s, one address (and the word on top of the stack) a line in /data/portal2/profile.txt.
         if (!access("/data/portal2/profile.request", F_OK)) {
             char what[16] = {0};
             FILE *request = fopen("/data/portal2/profile.request", "r");
             if (request) { if (!fgets(what, sizeof what, request)) what[0] = 0; fclose(request); }
             unlink("/data/portal2/profile.request");
             pthread_t target = title_main_thread;
-            int submit = !strncmp(what, "submit", 6) && rt_ps5_vk_submit_thread(&target);
-            int record = !submit && !strncmp(what, "record", 6) && rt_ps5_vk_record_thread(&target);
             profile_next = 0;
             for (int i = 0; i < PROFILE_SAMPLES; ++i) { pthread_kill(target, SIGPROF); usleep(5000); }
             usleep(20000);
             unsigned taken = profile_next < PROFILE_SAMPLES ? profile_next : PROFILE_SAMPLES;
             FILE *out = fopen("/data/portal2/profile.tmp", "w");
             if (out) {
-                fprintf(out, "profile: %s thread, main at %p, %u samples\n", submit ? "submit" : record ? "record" : "main", (void *)main, taken);
+                fprintf(out, "profile: main thread, main at %p, %u samples\n", (void *)main, taken);
                 for (unsigned i = 0; i < taken; ++i) fprintf(out, "%lx %lx\n", (unsigned long)profile_pcs[i], (unsigned long)profile_tops[i]);
                 fclose(out);
                 rename("/data/portal2/profile.tmp", "/data/portal2/profile.txt");
@@ -274,7 +267,7 @@ static void *watchdog(void *unused) {
         }
         if (tick % 15) continue;
         uint64_t now = rt_d3d9_presents();
-        if (now == last) { sample_is_hitch = 0; pthread_kill(title_main_thread, SIGINFO); }
+        if (now == last) pthread_kill(title_main_thread, SIGINFO);
         last = now;
     }
     return NULL;
@@ -292,10 +285,6 @@ __attribute__((constructor(102))) static void install_crash_log(void) {
     setenv("DXVK_LOG_PATH", "/data/portal2/tmp", 0);
     // No system fonts: tools/ps5/fonts.conf (the game's own fonts and the family aliases VGUI uses).
     if (!access("/data/portal2/fonts.conf", R_OK)) setenv("FONTCONFIG_FILE", "/data/portal2/fonts.conf", 0);
-    // Per-import guest call counts, to the log every 10 s (runtime/rt.c), while this file exists.
-    if (!access("/data/portal2/import_counts", F_OK)) setenv("P2_IMPORT_COUNTS", "1", 0);
-    // The guest lock's wait time on the main thread, to the log every 5 s (runtime/scheduler.c), while this file exists.
-    if (!access("/data/portal2/gate_timing", F_OK)) setenv("P2_GATE_TIMING", "1", 0);
     // Frame counter (runtime/fps_overlay.c, top left) while /data/portal2/show_fps exists.
     if (!access("/data/portal2/show_fps", F_OK)) setenv("P2_FPS", "1", 0);
     static const int fatal[] = {SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE};

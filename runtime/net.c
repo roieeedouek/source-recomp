@@ -121,10 +121,6 @@ static void guest_address(CPU *c, const struct sockaddr_storage *in, socklen_t i
 static _Atomic unsigned char nonblocking[4096];
 void rt_ps5_mark_nonblocking(int fd, int enable) {
     if (fd < 0 || fd >= (int)sizeof nonblocking) return;
-    if (enable && !nonblocking[fd]) {
-        int f = fcntl(fd, F_GETFL);
-        fprintf(stderr, "ps5: fd %d made non-blocking by the guest (host flags %#x, O_NONBLOCK %s)\n", fd, f, f >= 0 && (f & O_NONBLOCK) ? "set" : "not set");
-    }
     nonblocking[fd] = (unsigned char)(enable != 0);
 }
 static int nonblocking_flag(int fd) { return fd >= 0 && fd < (int)sizeof nonblocking && nonblocking[fd] ? MSG_DONTWAIT : 0; }

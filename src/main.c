@@ -44,8 +44,7 @@ static int wants_d3d9(int first, int argc, char **argv) {
 }
 
 #ifdef __PROSPERO__
-// Console payloads start without a command line (the ELF loader passes none):
-// the data lives under /data/portal2 (docs/ps5.md), laid out by tools/package_ps5.py.
+// The console title starts without a command line: the data lives under /data/portal2 (docs/ps5.md).
 #ifndef RT_PS5_ROOT
 #define RT_PS5_ROOT "/data/portal2"
 #endif
@@ -63,15 +62,12 @@ void rt_ps5_trace(const char *text);
 #endif
 int main(int argc, char **argv) {
 #ifdef __PROSPERO__
-#ifdef RT_PS5_TITLE
     // A title is started from the home screen: whatever the shell passes (an empty or odd argv) is not for the game.
     argc = 0;
     // No terminal to look at: DXVK says what failed (also written to a file next to the other logs).
     setenv("DXVK_LOG_LEVEL", "debug", 0);
     setenv("DXVK_LOG_PATH", "/data/portal2/tmp", 0);
-#endif
     if (argc <= 1) { argv = ps5_default_argv; argc = (int)(sizeof(ps5_default_argv) / sizeof(*ps5_default_argv)) - 1; }
-#ifdef RT_PS5_TITLE
     // Extra game arguments, whitespace-separated, from RT_PS5_ROOT/args.txt when present (e.g. "+map sp_a1_intro1"): testing
     // without a rebuild. They follow the defaults, after "--".
     {
@@ -93,7 +89,6 @@ int main(int argc, char **argv) {
             fprintf(stderr, "ps5: %d extra arguments from %s\n", count - (int)(sizeof(ps5_default_argv) / sizeof(*ps5_default_argv)) + 1, RT_PS5_ROOT "/args.txt");
         }
     }
-#endif
 #endif
     const char *program_name = RT_GAME_PROGRAM;
     // Qualité de service d'un jeu au premier plan : sans elle (lancé depuis un
@@ -140,12 +135,8 @@ int main(int argc, char **argv) {
     if (init_failed) {
         fputs("native runtime initialization failed\n", stderr); return 2;
     }
-#ifdef RT_PS5_TITLE
     // A title is refused chdir (observed): the guest's paths go through rt_paths, so the host's working directory is not needed.
     if (chdir(game)) { char note[160]; snprintf(note, sizeof note, "main: chdir(%s) refused (errno %d): continuing", game, errno); P2_TRACE(note); }
-#else
-    if (chdir(game)) { P2_TRACE("main: chdir(game) failed"); perror(game); rt_destroy(); return 2; }
-#endif
     P2_TRACE("main: in the game directory");
     if (map_tool)
         setenv("PORTAL2_NO_LAUNCHERMGR_REQUIRED_IN_MATERIAL_SYSTEM", "1", 0);

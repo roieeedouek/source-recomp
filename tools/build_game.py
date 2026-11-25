@@ -275,13 +275,10 @@ def main():
     games.add_argument(parser)
     parser.add_argument('--layout', type=Path, help='default: <build_dir>/prep/layout.json of the game')
     parser.add_argument('--target', choices=('host', 'ps5'), default='host',
-                        help='ps5: cross-compile for a jailbroken PS5 with the payload SDK (PS5_PAYLOAD_SDK); '
-                             'reuses the lifted C, own object cache build/<game>/obj-ps5, default output build/portal2-ps5.elf')
-    parser.add_argument('--shared', action='store_true',
-                        help='ps5: link the game as a shared library (build/portal2-ps5.so) for the launcher (tools/ps5/launcher.c) to dlopen')
-    parser.add_argument('--title', action='store_true',
-                        help='ps5: compile for a native title (-DRT_PS5_TITLE: no dlopen, RADV linked in) and stop after writing '
-                             '<build_dir>/link.rsp; tools/ps5/build_title.sh links it (docs/ps5.md)')
+                        help='ps5: cross-compile for a jailbroken PS5 as a native title, with the payload SDK (PS5_PAYLOAD_SDK); '
+                             'reuses the lifted C, own object cache build/<game>/obj-ps5; stops after writing <build_dir>/link.rsp, '
+                             'which tools/ps5/build_title.sh links (docs/ps5.md)')
+    parser.add_argument('--title', action='store_true', help=argparse.SUPPRESS)   # implied by --target ps5 (older commands)
     parser.add_argument('--out', type=Path, help='default: the game\'s binary (build/portal2-native, build/hl2/hl2-native)')
     parser.add_argument('--opt', default='1', choices=['0', '1', '2', '3'], help='generated code')
     parser.add_argument('--runtime-opt', choices=['0', '1', '2', '3'], help='runtime and main (default: --opt)')
@@ -330,7 +327,8 @@ def main():
     game = games.profile(config)
     build_dir = args.build_dir or ROOT / game['build_dir']
     args.layout = args.layout or build_dir / 'prep/layout.json'
-    args.out = args.out or (ROOT / ('build/portal2-ps5.so' if args.shared else 'build/portal2-ps5.elf') if args.target == 'ps5' else ROOT / game['binary'])
+    args.title = args.title or args.target == 'ps5'
+    args.out = args.out or ROOT / game['binary']
     args.stats = args.stats or build_dir / 'build-stats.json'
     if not args.layout.exists():
         parser.exit(1, f'{args.layout} missing: run python3 tools/gameprep.py --game {game["name"]}\n')
@@ -405,7 +403,7 @@ def main():
         print(f'{compiled}/{len(units)} files compiled in {compile_time:.0f} s; objects listed in {response}')
         return
     temporary = args.out.with_name(f'.{args.out.name}.tmp')
-    link_flags = (['-shared', f'-Wl,--version-script={ROOT}/tools/ps5/exports.map', '-Wl,--wrap=dlopen', '-Wl,--wrap=dlsym', '-Wl,--wrap=dlerror', '-Wl,--wrap=dlclose'] if args.shared else []) + (['-fprofile-instr-generate'] if args.pgo_generate else []) + \
+    link_flags = (['-fprofile-instr-generate'] if args.pgo_generate else []) + \
         ([f'-Wl,-order_file,{args.order_file}'] if args.order_file else [])
     subprocess.run([CC, f'@{response}', *HOST_LIBS, *link_flags, '-o', str(temporary)], check=True)
     os.replace(temporary, args.out)
