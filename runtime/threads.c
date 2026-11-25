@@ -130,7 +130,12 @@ int rt_thread_shim(CPU *c,const char *name) {
         rt_cpu_reset(&t->cpu);t->cpu.tid=next_tid++;
         t->cpu.fcw=c->fcw;t->cpu.mxcsr=c->mxcsr;
         t->signal_mask=rt_signal_blocked_mask();
-        if(map_stack(c,t,attr?attr->size:8*1024*1024)){free(t);c->eax=RT_EAGAIN;return 1;}
+        if(map_stack(c,t,attr?attr->size:8*1024*1024)){
+#ifdef __PROSPERO__
+            fprintf(stderr,"[threads] pthread_create: guest stack of %u KiB refused\n",attr?attr->size/1024:8192);
+#endif
+            free(t);c->eax=RT_EAGAIN;return 1;
+        }
         t->handle=rt_thread_pointer(&t->cpu);
         t->entry=rt_arg32(c,2);t->argument=rt_arg32(c,3);
         pthread_attr_t native_attr;error=pthread_attr_init(&native_attr);
@@ -141,6 +146,10 @@ int rt_thread_shim(CPU *c,const char *name) {
             if(!error)error=pthread_create(&t->native,&native_attr,thread_entry,t);
             pthread_attr_destroy(&native_attr);
         }
+#ifdef __PROSPERO__
+        fprintf(stderr,"[threads] pthread_create: guest thread %u, entry %#x, guest stack %u KiB -> %d\n",t->cpu.tid,rt_arg32(c,2),
+                attr?attr->size/1024:8192,error);
+#endif
         if(error){rt_munmap(t->stack,t->length);rt_tls_release(t->cpu.tid);free(t);}   // TCB alloué par rt_thread_pointer
         else {t->next=threads;threads=t;W32(address,t->handle);}
         c->eax=error==EAGAIN?RT_EAGAIN:(uint32_t)error;

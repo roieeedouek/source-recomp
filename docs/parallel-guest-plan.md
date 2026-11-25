@@ -114,7 +114,24 @@ with the serial gate. What is established:
 - The PC build with 4 CPUs did not obviously hang within 8 minutes, but at 3 fps (software
   rendering) it may not reach the same point; it is not yet known whether this is console-specific.
 
-Next: find what the pool's job hand-off waits for (disassemble `vstdlib` around `0x1fed0` and
+Later the same day, from `tier0`'s and `vstdlib`'s machine code (their sources are not in the public
+SDK; `tier0` exports its synchronization functions by name):
+
+- `CThreadSyncObject::WaitForMultiple` on POSIX polls: `Wait(0)` on each object, then `usleep(0)`,
+  until the deadline (`Plat_MSTime`). `CThreadEvent::Set` locks, sets the flags, signals the event's own
+  condition and unlocks. A worker that finds its event already set returns without touching the
+  condition, so the condition trace shows no wake for it.
+- The workers are `tier0` `CWorkerThread`s (`WaitForCall`, `PeekCall`, `Reply`, `CThread::Suspend`);
+  `vstdlib` near `0x1fed0` is the pool's start-up (it constructs `CWorkerThread`s and their events,
+  names and starts them), and both stalls have the main thread inside it.
+- The event the main thread waits on at the stall (`0x8321baf0`) is not among the four workers'
+  objects, and only five guest threads ever exist: the working hypothesis is that start-up creates
+  another worker whose creation fails, and waits forever for it to report idle. Each guest thread gets a
+  16 MiB host stack (from direct memory, through the SDK's `pthread_create` wrap) and an 8 MiB guest
+  stack. `runtime/threads.c` now logs every guest thread creation with its result (`[threads]` lines)
+  to confirm it; the console went down before that run.
+
+Next: confirm or rule out the failed thread creation; then find what the pool's job hand-off waits for (disassemble `vstdlib` around `0x1fed0` and
 `0x21d10`, name the `0xff01xxxx` call targets, which are not in `layout.json`'s import list), compare
 with a longer PC run, then fix the hand-off before measuring anything. Diagnostics available:
 `P2_TRACE_COND=1` (every guest condition wait and wake, `runtime/pthreads.c`), stall sampling of every
