@@ -189,6 +189,7 @@ int rt_ps5_vk_submit_thread(pthread_t *thread);
 int rt_ps5_vk_record_thread(pthread_t *thread);
 int rt_d3d9_present_thread(pthread_t *thread);
 void rt_threads_sample(int signal);
+int rt_threads_native(unsigned tid, pthread_t *native);
 void rt_ps5_vk_flush(void);
 static volatile int sample_is_hitch;
 // Profiling on request: SIGPROF records only the interrupted instruction address, from the signal context. No stack walk: a
@@ -262,13 +263,18 @@ static void *watchdog(void *unused) {
             int submit = !strncmp(what, "submit", 6) && rt_ps5_vk_submit_thread(&target);
             int record = !submit && !strncmp(what, "record", 6) && rt_ps5_vk_record_thread(&target);
             int present = !submit && !record && !strncmp(what, "present", 7) && rt_d3d9_present_thread(&target);
+            unsigned guest = 0;   // "guest N": guest thread N (2 is the first one the game starts)
+            if (!submit && !record && !present && sscanf(what, "guest %u", &guest) == 1 && !rt_threads_native(guest, &target)) guest = 0;
             profile_next = 0;
             for (int i = 0; i < PROFILE_SAMPLES; ++i) { pthread_kill(target, SIGPROF); usleep(5000); }
             usleep(20000);
             unsigned taken = profile_next < PROFILE_SAMPLES ? profile_next : PROFILE_SAMPLES;
             FILE *out = fopen("/data/portal2/profile.tmp", "w");
             if (out) {
-                fprintf(out, "profile: %s thread, main at %p, %u samples\n", submit ? "submit" : record ? "record" : present ? "present" : "main", (void *)main, taken);
+                char label[24];
+                if (guest) snprintf(label, sizeof label, "guest %u", guest);
+                else snprintf(label, sizeof label, "%s", submit ? "submit" : record ? "record" : present ? "present" : "main");
+                fprintf(out, "profile: %s thread, main at %p, %u samples\n", label, (void *)main, taken);
                 for (unsigned i = 0; i < taken; ++i) fprintf(out, "%lx %lx\n", (unsigned long)profile_pcs[i], (unsigned long)profile_tops[i]);
                 fclose(out);
                 rename("/data/portal2/profile.tmp", "/data/portal2/profile.txt");

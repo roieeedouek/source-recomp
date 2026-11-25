@@ -93,49 +93,42 @@ a play session, and the host tests.
 7. **Defaults.** Parallel on the PS5 and Linux x86-64 when it is faster everywhere measured; serial
    stays available (`RT_SERIAL_GUEST`) and remains the macOS default.
 
-## Status (2026-11-25)
+## Status (2026-11-25): step 1 done
 
-Step 1 is blocked: with more than one CPU reported (`P2_GUEST_CPUS=2` or `4`, set on the console
-through `/data/portal2/env.txt`), the game hangs while loading a save, before its second frame, even
-with the serial gate. What is established:
+**The hang with several CPUs is fixed.** The runtime asked 16 MiB host stacks for guest threads; on the
+console a request of 2 MiB or more bypasses the platform's thread wrap and comes from flexible memory
+(~400 MiB for the whole title), so the sixth guest thread failed (`EAGAIN`) and Source's thread pool
+waited for it forever. Guest threads now take the wrap's 2 MiB direct-memory stacks (the main thread's
+size). With `P2_GUEST_CPUS=4` the game runs; 13 guest threads start.
 
-- Source starts a thread pool of N workers (`vstdlib`, all entering `libtier0`'s thread start at
-  `0x10017590`); the start handshake works (each worker signals the main thread, which wakes).
-- The main thread then hands work to the pool (`engine.so` → `vstdlib` near `0x1fed0`) and waits
-  for its completion: a manual-reset event (`CThreadSyncObject::Wait`, `libtier0` `0x16f70`)
-  waited in 10 ms slices, forever.
-- The workers poll their two per-thread events with zero timeouts and sleep 100 ms at a time on a
-  shared event that no thread ever signals, on the PC as on the console. So jobs reach the workers
-  only by polling, which is consistent with "2 or 4 CPUs measured slower" in `docs/usage.md`, and
-  here they never do.
-- Ruled out: the console's condition-variable clock (realtime, as the guest assumes:
-  `tools/ps5/title_cond_probe.c`), error codes (translated to Linux values), thread priorities (the
-  game sets none).
-- The PC build with 4 CPUs did not obviously hang within 8 minutes, but at 3 fps (software
-  rendering) it may not reach the same point; it is not yet known whether this is console-specific.
+**Measurement (PS5, saved chamber, serial gate, `P2_GUEST_CPUS=4`, Source's default queued mode): 42 fps**,
+against 86–88 with one CPU. Per thread (`run_title.sh --profile "guest N"`, 10 s each):
 
-Later the same day, from `tier0`'s and `vstdlib`'s machine code (their sources are not in the public
-SDK; `tier0` exports its synchronization functions by name):
+| Thread | Game code | Runtime | DXVK | Waiting |
+|---|---|---|---|---|
+| Main | 30% | 10% | 0% | 60% |
+| Render thread (guest 14) | 18% (shaderapivk, materialsystem, stdshader) | 13% | 2% | 67% |
+| 11 job-pool workers | ~0% | ~0% | 0% | ~100% |
 
-- `CThreadSyncObject::WaitForMultiple` on POSIX polls: `Wait(0)` on each object, then `usleep(0)`,
-  until the deadline (`Plat_MSTime`). `CThreadEvent::Set` locks, sets the flags, signals the event's own
-  condition and unlocks. A worker that finds its event already set returns without touching the
-  condition, so the condition trace shows no wake for it.
-- The workers are `tier0` `CWorkerThread`s (`WaitForCall`, `PeekCall`, `Reply`, `CThread::Suspend`);
-  `vstdlib` near `0x1fed0` is the pool's start-up (it constructs `CWorkerThread`s and their events,
-  names and starts them), and both stalls have the main thread inside it.
-- The event the main thread waits on at the stall (`0x8321baf0`) is not among the four workers'
-  objects, and only five guest threads ever exist: the working hypothesis is that start-up creates
-  another worker whose creation fails, and waits forever for it to report idle. Each guest thread gets a
-  16 MiB host stack (from direct memory, through the SDK's `pthread_create` wrap) and an 8 MiB guest
-  stack. `runtime/threads.c` now logs every guest thread creation with its result (`[threads]` lines)
-  to confirm it; the console went down before that run.
+At 23.7 ms a frame the main thread is busy ~9.5 ms and the render thread ~7.8 ms; serialized they take
+turns. Run in parallel, a frame would take about the longer of the two, less the gate contention the
+runtime share shows: **~8–9.5 ms, 100–120 fps**, against 86 today. The job pool contributes nothing,
+so the gain is the render thread alone. Source's queued mode itself costs some (the two threads' work
+adds up to more than the single-threaded frame's 11.6 ms).
 
-Next: confirm or rule out the failed thread creation; then find what the pool's job hand-off waits for (disassemble `vstdlib` around `0x1fed0` and
-`0x21d10`, name the `0xff01xxxx` call targets, which are not in `layout.json`'s import list), compare
-with a longer PC run, then fix the hand-off before measuring anything. Diagnostics available:
-`P2_TRACE_COND=1` (every guest condition wait and wake, `runtime/pthreads.c`), stall sampling of every
-guest thread (`runtime/threads.c`, `rt_threads_sample`), `--profile present` (the presenting thread).
+Findings on the way (kept for the record):
+
+- `tier0`'s POSIX `CThreadSyncObject::WaitForMultiple` polls (`Wait(0)` on each object, `usleep(0)`,
+  until the deadline); `CThreadEvent::Set` signals only the event's own condition. Pool workers are
+  `tier0` `CWorkerThread`s that check their events and sleep 100 ms on a shared event no one signals.
+- Ruled out along the way: the console's condition-variable clock (realtime, `title_cond_probe.c`),
+  error codes, thread priorities.
+- Naming a guest call target in a prep image: `(disassembled target + module base) & 0xffffffff`, then
+  symbolize with that module's image (`tier0` exports its thread classes by name).
+
+Decision point: the ceiling justifies steps 2–6 only if ~100–120 fps is worth a large change to the
+lifter and the runtime. Step 2 (acquire/release guest accesses, measured under the serial gate) is the
+next cheap check: if it costs more than ~5%, the gain shrinks to little.
 
 ## Risks and how they are caught
 

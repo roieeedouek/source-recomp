@@ -51,6 +51,12 @@ void rt_threads_sample(int signal) {
         pthread_kill(t->native, signal);
     }
 }
+// The native thread running guest thread `tid` (the profiler's "guest N" target, ps5_title.c); 0 if there is none.
+int rt_threads_native(unsigned tid, pthread_t *native) {
+    for (Thread *t = threads; t; t = t->next)
+        if (t->cpu.tid == tid && !t->finished && !t->foreign) { *native = t->native; return 1; }
+    return 0;
+}
 #endif
 static Thread *find_thread(uint32_t handle){for(Thread *t=threads;t;t=t->next)if(t->handle==handle)return t;return NULL;}
 static void unlink_thread(Thread *t){Thread **link=&threads;while(*link && *link!=t)link=&(*link)->next;if(*link)*link=t->next;}
@@ -140,7 +146,14 @@ int rt_thread_shim(CPU *c,const char *name) {
         t->entry=rt_arg32(c,2);t->argument=rt_arg32(c,3);
         pthread_attr_t native_attr;error=pthread_attr_init(&native_attr);
         if(!error){
+#ifdef __PROSPERO__
+            // No size asked: the console's thread wrap (PS5 platform, threads.c) then gives 2 MiB of direct memory, the main
+            // thread's size, which runs the game's deepest call chains. 2 MiB or more is taken from flexible memory (~400 MiB
+            // for the whole title): with 16 MiB each, the sixth guest thread failed (EAGAIN) and Source's thread pool
+            // waited for it forever as soon as the game saw more than one CPU.
+#else
             error=pthread_attr_setstacksize(&native_attr,16*1024*1024);
+#endif
             // Threads du jeu (mixage audio, travaux) : même qualité de service que le thread principal.
             if(!error)error=pthread_attr_set_qos_class_np(&native_attr,QOS_CLASS_USER_INTERACTIVE,0);
             if(!error)error=pthread_create(&t->native,&native_attr,thread_entry,t);
