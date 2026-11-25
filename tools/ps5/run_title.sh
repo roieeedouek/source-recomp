@@ -2,14 +2,15 @@
 # Uploads the built title, launches it through the console's shell server and prints its log.
 #   PS5_HOST=<console address> tools/ps5/run_title.sh [--no-upload] [--wait SECONDS] [TITLE_ID]
 #   tools/ps5/run_title.sh --shot OUT.png      screenshot of the running game (it writes /data/portal2/screen.bmp on request)
+#   tools/ps5/run_title.sh --shot-full OUT.png the whole 3840x2160 frame (for title artwork, tools/ps5/make_title_art.py)
 #   tools/ps5/run_title.sh --profile main|submit|record   10 s of instruction-address samples of the running game, symbolized (tools/ps5/profile_report.py)
 # Needs on the console: an FTP server (port 2120 or 2121: probed), shsrv on 2323. The game writes /data/portal2/log.txt; this prints
 # it from the last "=== portal2 title starts" marker. Ends when the log shows an exit or a fatal signal, or after the wait.
 set -euo pipefail
 host=${PS5_HOST:?set PS5_HOST to the console address}
-upload=1 wait=120 shot="" profile=""
+upload=1 wait=120 shot="" profile="" shot_size=""
 while [[ ${1:-} == --* ]]; do
-    case $1 in --no-upload) upload=0 ;; --wait) wait=$2; shift ;; --shot) shot=$2; shift ;; --profile) profile=$2; shift ;; *) echo "unknown option $1" >&2; exit 2 ;; esac
+    case $1 in --no-upload) upload=0 ;; --wait) wait=$2; shift ;; --shot) shot=$2; shift ;; --shot-full) shot=$2; shot_size=full; shift ;; --profile) profile=$2; shift ;; *) echo "unknown option $1" >&2; exit 2 ;; esac
     shift
 done
 title=${1:-PPSA97622}
@@ -36,14 +37,15 @@ if [[ -n $profile ]]; then
     exit 0
 fi
 if [[ -n $shot ]]; then
-    curl -sS --disable-epsv --max-time 15 -T /dev/null "ftp://$host:$ftp_port/data/portal2/screenshot.request"
+    printf '%s\n' "$shot_size" | curl -sS --disable-epsv --max-time 15 -T - "ftp://$host:$ftp_port/data/portal2/screenshot.request"
     for ((t = 0; t < 15; t++)); do
         sleep 1
         curl -s --disable-epsv --max-time 10 "ftp://$host:$ftp_port/data/portal2/" | grep "screenshot.request" > /dev/null || break
     done
     sleep 1
     bmp=$(mktemp --suffix=.bmp)
-    curl -sS --disable-epsv --max-time 60 "ftp://$host:$ftp_port/data/portal2/screen.bmp" -o "$bmp"
+    sleep 2
+    curl -sS --disable-epsv --max-time 120 "ftp://$host:$ftp_port/data/portal2/screen.bmp" -o "$bmp"
     python3 -I -c 'import sys; from PIL import Image; Image.open(sys.argv[1]).save(sys.argv[2])' "$bmp" "$shot"
     rm -f "$bmp"
     echo "screenshot: $shot"

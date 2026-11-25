@@ -53,8 +53,16 @@ for name in "${platform_names[@]}"; do flags+=("--defsym=$name=ps5_$name"); done
 { printf '{\n    local:\n'; printf '        %s;\n' "${shims[@]}" "${platform_names[@]}" chown lchown readlink towupper_l towlower_l rt_towupper_l rt_towlower_l "${pgo_local[@]}" rt_title_readlink __wrap_sceAgcDriverSubmitDcb __wrap_sceAgcSuspendPoint __wrap_fprintf __wrap_vfprintf __wrap_fputs __wrap_fputc __wrap_fwrite chdir getcwd rt_title_chdir rt_title_getcwd 'gl*'; printf '};\n'; } > "$work/shims-local.map"
 flags+=(--version-script "$work/shims-local.map")
 
+# Title artwork: build/ps5-art (tools/ps5/make_title_art.py: icon0.png, pic0.dds, pic1.dds) when it exists, else the
+# placeholder icon. Made from screenshots of the game, it stays out of the repository.
+art=${PS5_TITLE_ART:-$root/build/ps5-art}
+icon=$root/build/ps5-app/PPSA97620/sce_sys/icon0.png
+[[ -f $art/icon0.png ]] && icon=$art/icon0.png
 PS5_UNBIND=readlink PS5_EXTRA_STUBS="libSceMouse=$(realpath "$deps/ps5-doom3/ps5/stubs/libSceMouse_stub.c")" PS5_TITLE_WORK=$work/link \
-"$here/title_link.sh" "$work/$title" "$work/param.json" "$root/build/ps5-app/PPSA97620/sce_sys/icon0.png" \
+"$here/title_link.sh" "$work/$title" "$work/param.json" "$icon" \
     "@$root/build/game/link.rsp" "$work/dltable.o" "${flags[@]}" "${pgo_flags[@]}" \
     --whole-archive "$glue/libps5_platform.a" --no-whole-archive "$glue/SDL2/libSDL2.a" \
     -L "$homebrew" --start-group -lopenal -lfontconfig -lfreetype -liconv -lpng16 -lexpat -lbz2 --end-group
+for picture in pic0.dds pic1.dds; do
+    if [[ -f $art/$picture ]]; then cp "$art/$picture" "$work/$title/sce_sys/$picture"; fi
+done

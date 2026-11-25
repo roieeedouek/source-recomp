@@ -1137,6 +1137,11 @@ static void ps5_screenshot(void *device) {
     if (now == last_check) return;
     last_check = now;
     if (access("/data/portal2/screenshot.request", F_OK)) return;
+    // A request file that says "full" asks for the whole frame (3840x2160, ~25 MB), for title artwork.
+    char what[8] = {0};
+    FILE *request = fopen("/data/portal2/screenshot.request", "r");
+    if (request) { if (!fgets(what, sizeof what, request)) what[0] = 0; fclose(request); }
+    int full = !strncmp(what, "full", 4);
     unlink("/data/portal2/screenshot.request");
     void **vt = (void **)D3D9_VTBL(device), *back = NULL, *copy = NULL;
     char note[200];
@@ -1151,7 +1156,7 @@ static void ps5_screenshot(void *device) {
     HostLockedRect locked = {0};
     if (hr >= 0) hr = ((int32_t (*)(void *, HostLockedRect *, const void *, uint32_t))((void **)D3D9_VTBL(copy))[D3D9_SLOT_IDirect3DSurface9_LockRect])(copy, &locked, NULL, 0x10);
     if (hr >= 0 && locked.pBits && desc.Width && (desc.Format == 21 || desc.Format == 22)) {
-        uint32_t step = (desc.Width + 959) / 960, w = desc.Width / step, h = desc.Height / step, row = (w * 3 + 3) & ~3u;
+        uint32_t step = full ? 1 : (desc.Width + 959) / 960, w = desc.Width / step, h = desc.Height / step, row = (w * 3 + 3) & ~3u;
         uint8_t *image = malloc((size_t)row * h + 54);
         if (image) {
             uint8_t *hd = image;

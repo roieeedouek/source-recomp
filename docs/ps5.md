@@ -45,6 +45,14 @@ Profile-guided optimization (about 13% faster on the console): build the Linux h
 compiler are the same on both, so a host profile applies to the console build. (An instrumented console
 build is over 1 GB and does not run.)
 
+## Title artwork
+
+`tools/ps5/make_title_art.py --icon IMAGE --background IMAGE [--launch IMAGE]` writes `build/ps5-art`: the
+512x512 `icon0.png` and the 3840x2160 BC7 `pic0.dds` (home screen) and `pic1.dds` (launch screen), which
+`build_title.sh` copies into the title. `run_title.sh --shot-full OUT.png` takes a whole 4K frame to make
+them from. Artwork made from the game's screenshots is Valve's: keep it out of the repository (`build/`
+is ignored).
+
 ## Run and diagnose
 
 `PS5_HOST=<console> tools/ps5/run_title.sh` uploads the title over FTP, stops a running instance
