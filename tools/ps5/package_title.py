@@ -12,13 +12,13 @@ build/ps5-release/portal2-ps5-<version>-self-contained/{PPSA97622, INSTALL.txt},
 Writes build/ps5-release/portal2-ps5-<version>/ and a .zip of it:
 
     homebrew/PPSA97622/      the title: eboot.bin, sce_sys/param.json and icon0.png, sce_module/libc.prx
-    portal2/                 support files for /data/portal2: fonts.conf, fps60 (60 fps lock; --no-fps60 leaves it out)
+    portal2/                 support files for the title folder: fonts.conf, fps60 (60 fps lock; --no-fps60 leaves it out)
     game-files.sha256        the game's Linux binaries this build was made from (tools/gameprep.py's plan)
     check_game.py            checks a Portal 2 installation against game-files.sha256
     INSTALL.txt              short installation steps (README.md, "PS5", has the full ones)
 
-The player supplies the game: their own Portal 2 (Linux files) copied to /data/portal2/game, and /data/portal2/prep made
-from it with tools/gameprep.py. The title only runs with the exact game build it was compiled from, hence the checksums.
+The player supplies the game: their own Portal 2 (Linux files) as game/ in the title folder, and prep/ made from it
+with tools/gameprep.py. The title only runs with the exact game build it was compiled from, hence the checksums.
 
 The icon is a plain text one: artwork made from the game's screenshots (build/ps5-art) is only included with --with-art,
 for a package that stays with you. eboot.bin contains code translated from the game's own binaries: keep such a package
@@ -73,16 +73,14 @@ and a clone of https://github.com/roieeedouek/source-recomp (branch ps5-port).
 2. Prepare its libraries:       in the clone, set "linux_root"/"game_root" in config/local.json
                                 to your Portal 2 folder, then: python3 tools/gameprep.py
                                 (writes build/game/prep)
-3. Copy to the console (FTP), keeping the folder names:
-     homebrew/PPSA97622        -> /data/homebrew/PPSA97622
-     <your Portal 2 folder>    -> /data/portal2/game
-     build/game/prep           -> /data/portal2/prep
-     portal2/*                 -> /data/portal2/
-4. Make /data/homebrew/PPSA97622/eboot.bin executable (chmod 755) and register the title with your
+3. Put the game in the title folder: your Portal 2 folder as homebrew/PPSA97622/game,
+   build/game/prep as homebrew/PPSA97622/prep, and portal2/* into homebrew/PPSA97622/.
+4. Copy homebrew/PPSA97622 to /data/homebrew/PPSA97622 on the console (FTP), make
+   /data/homebrew/PPSA97622/eboot.bin executable (chmod 755), register the title with your
    homebrew launcher (ShadowMountPlus), then start "Portal 2 (source-recomp)".
 
-Optional files in /data/portal2: fps60 (60 fps lock), show_fps (frame counter), args.txt (extra game
-arguments, e.g. +load <save>). The log is /data/portal2/log.txt. See README.md, "PS5", for details.
+Optional files in /data/homebrew/PPSA97622: fps60 (60 fps lock), show_fps (frame counter), args.txt
+(extra game arguments, e.g. +load <save>). The log is log.txt there. See README.md, "PlayStation 5".
 
 This package contains code translated from Portal 2's own binaries: keep it for yourself, do not publish it.
 '''

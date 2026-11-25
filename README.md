@@ -394,44 +394,71 @@ python3 tools/gameprep.py                       # prepare the game's Linux libra
 tools/ps5/build_title_deps.sh                   # SDL2 and the console glue
 python3 tools/build_game.py --target ps5 --release
 tools/ps5/build_title.sh                        # the title: build/ps5-title-game/PPSA97622
-python3 tools/ps5/package_title.py              # a package to install: build/ps5-release/*.zip
+python3 tools/ps5/package_title.py --self-contained   # the title folder with everything, see below
 ```
 
 The first `build_game.py` takes about an hour. A profile-guided build runs
 about 13% faster (`docs/ps5.md`, "Build").
 
-### Install a package
+### Install
 
-A package (`tools/ps5/package_title.py`, above) holds the title, a few support
-files and the fingerprints of the game binaries it was built from; **no game
-files**. It only runs with exactly those binaries, so first check your copy:
+Everything lives in the title's folder on the console, `/data/homebrew/PPSA97622`:
+
+| In `PPSA97622/` | What |
+|---|---|
+| `eboot.bin`, `sce_sys/`, `sce_module/` | the title |
+| `game/` | your Portal 2 (its Linux files) |
+| `prep/` | the game's prepared libraries (`tools/gameprep.py`) |
+| `fonts.conf`, `fps60`, `show_fps` | support and option files |
+| `user/` | saves, settings and shader caches (created on first start) |
+
+The game looks there first (when `game/portal2` exists) and falls back to
+`/data/portal2`, the older layout.
+
+**From your own build** (the usual way):
+
+1. `python3 tools/ps5/package_title.py --self-contained` writes
+   `build/ps5-release/portal2-ps5-<version>-self-contained/PPSA97622`, about
+   12 GB: the title, your game files (hard-linked, no extra space), `prep/`,
+   the support files and your artwork (`tools/ps5/make_title_art.py`). It
+   contains Portal 2: keep it for yourself.
+2. Copy the folder `PPSA97622` to `/data/homebrew/` with your FTP client.
+3. Make `/data/homebrew/PPSA97622/eboot.bin` executable (`chmod 755`, from the
+   FTP client or the shell server).
+4. Register the title with your launcher (ShadowMountPlus) and start
+   **Portal 2 (source-recomp)**.
+
+**From a package without game files** (`tools/ps5/package_title.py`, no
+option: the title, the support files and the fingerprints of the game
+binaries it was built from). It only runs with exactly those binaries:
 
 1. `python3 check_game.py "<your Portal 2 folder>"` (from the package).
 2. In a clone of this repository, set `linux_root` and `game_root` in
-   `config/local.json` to your Portal 2 folder, then run
-   `python3 tools/gameprep.py`: it writes `build/game/prep`.
-3. Copy to the console over FTP, keeping the folder names:
+   `config/local.json` to your Portal 2 folder and run
+   `python3 tools/gameprep.py` (it writes `build/game/prep`).
+3. Put your Portal 2 folder in the package's `homebrew/PPSA97622/game`,
+   `build/game/prep` in `homebrew/PPSA97622/prep`, and the package's
+   `portal2/*` files in `homebrew/PPSA97622/`; then steps 2–4 above.
 
-   | From | To |
-   |---|---|
-   | the package's `homebrew/PPSA97622` | `/data/homebrew/PPSA97622` |
-   | your Portal 2 folder | `/data/portal2/game` |
-   | `build/game/prep` | `/data/portal2/prep` |
-   | the package's `portal2/*` | `/data/portal2/` |
+**Already playing from `/data/portal2`?** Copy only the small files of the new
+`PPSA97622` (`eboot.bin`, `sce_sys`, `sce_module`, `fonts.conf`, `fps60`,
+`show_fps`), then move the rest on the console from the shell server (port
+2323); within `/data` it is instant and your saves come along:
 
-4. Make `/data/homebrew/PPSA97622/eboot.bin` executable (`chmod 755` from the
-   shell server or your FTP client), register the title with your launcher,
-   and start **Portal 2 (source-recomp)**.
+```sh
+mv /data/portal2/game /data/homebrew/PPSA97622/game
+mv /data/portal2/prep /data/homebrew/PPSA97622/prep
+mv /data/portal2/user /data/homebrew/PPSA97622/user
+```
 
-Saves, settings and the shader caches go to `/data/portal2/user`; the log is
-`/data/portal2/log.txt`.
+The log is `log.txt` in the same folder.
 
-### Options (files in `/data/portal2`)
+### Options (files in `/data/homebrew/PPSA97622`)
 
 | File | Effect |
 |---|---|
-| `fps60` (in the package) | 60 fps, paced by the display; checked every second, delete it to unlock |
-| `show_fps` | frame counter in the top left |
+| `fps60` | 60 fps, paced by the display; checked every second, delete it to unlock (up to 120 Hz) |
+| `show_fps` | frame counter in the top left; delete it to hide |
 | `args.txt` | extra game arguments, e.g. `+load <save name>` to start in a save |
 
 Building, the console specifics and the tools that upload, launch, screenshot
