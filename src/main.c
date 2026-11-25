@@ -44,14 +44,19 @@ static int wants_d3d9(int first, int argc, char **argv) {
 }
 
 #ifdef __PROSPERO__
-// The console title starts without a command line: the data lives under /data/portal2 (docs/ps5.md).
-#ifndef RT_PS5_ROOT
-#define RT_PS5_ROOT "/data/portal2"
-#endif
-static char *ps5_default_argv[] = {
-    "portal2", "--images", RT_PS5_ROOT "/prep", "--game-dir", RT_PS5_ROOT "/game", "--linux-root", RT_PS5_ROOT "/game",
-    "--user-dir", RT_PS5_ROOT "/user", "--", "-game", "portal2", "-novid", "-fullscreen", "-w", "3840", "-h", "2160", NULL,
-};
+// The console title starts without a command line: the game, its prepared libraries and the saves are in the data folder
+// (runtime/ps5.c, rt_ps5_data: the title's own folder when it holds the game, else /data/portal2; docs/ps5.md).
+const char *rt_ps5_data(const char *relative);
+enum { PS5_DEFAULT_ARGS = 18 };
+static char *ps5_default_argv[PS5_DEFAULT_ARGS + 1];
+static void ps5_default_arguments(void) {
+    char *defaults[PS5_DEFAULT_ARGS] = {
+        "portal2", "--images", (char *)rt_ps5_data("prep"), "--game-dir", (char *)rt_ps5_data("game"),
+        "--linux-root", (char *)rt_ps5_data("game"), "--user-dir", (char *)rt_ps5_data("user"), "--",
+        "-game", "portal2", "-novid", "-fullscreen", "-w", "3840", "-h", "2160",
+    };
+    memcpy(ps5_default_argv, defaults, sizeof defaults);
+}
 #endif
 
 #ifdef __PROSPERO__
@@ -63,17 +68,14 @@ void rt_ps5_trace(const char *text);
 int main(int argc, char **argv) {
 #ifdef __PROSPERO__
     // A title is started from the home screen: whatever the shell passes (an empty or odd argv) is not for the game.
-    argc = 0;
-    // No terminal to look at: DXVK says what failed (also written to a file next to the other logs).
-    setenv("DXVK_LOG_LEVEL", "debug", 0);
-    setenv("DXVK_LOG_PATH", "/data/portal2/tmp", 0);
-    if (argc <= 1) { argv = ps5_default_argv; argc = (int)(sizeof(ps5_default_argv) / sizeof(*ps5_default_argv)) - 1; }
-    // Extra game arguments, whitespace-separated, from RT_PS5_ROOT/args.txt when present (e.g. "+map sp_a1_intro1"): testing
-    // without a rebuild. They follow the defaults, after "--".
+    ps5_default_arguments();
+    argv = ps5_default_argv; argc = PS5_DEFAULT_ARGS;
+    // Extra game arguments, whitespace-separated, from args.txt in the data folder when present (e.g. "+load <save>").
+    // They follow the defaults, after "--".
     {
         static char text[2048];
-        static char *combined[64 + sizeof(ps5_default_argv) / sizeof(*ps5_default_argv)];
-        FILE *extra = fopen(RT_PS5_ROOT "/args.txt", "r");
+        static char *combined[64 + PS5_DEFAULT_ARGS + 1];
+        FILE *extra = fopen(rt_ps5_data("args.txt"), "r");
         size_t length = extra ? fread(text, 1, sizeof text - 1, extra) : 0;
         if (extra) fclose(extra);
         if (length) {
@@ -86,7 +88,7 @@ int main(int argc, char **argv) {
                 combined[count++] = word;
             combined[count] = NULL;
             argv = combined; argc = count;
-            fprintf(stderr, "ps5: %d extra arguments from %s\n", count - (int)(sizeof(ps5_default_argv) / sizeof(*ps5_default_argv)) + 1, RT_PS5_ROOT "/args.txt");
+            fprintf(stderr, "ps5: %d extra arguments from %s\n", count - PS5_DEFAULT_ARGS, rt_ps5_data("args.txt"));
         }
     }
 #endif

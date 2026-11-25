@@ -146,29 +146,50 @@ void rt_ps5_log_settle(void) {
     usleep(20000);
 }
 
+// Where the game's files live: the title's own folder (/app0, that is /data/homebrew/<title>) when it holds the game
+// (game/portal2), else /data/portal2. Saves, caches, the log and the option files go there too.
+static const char *data_root = "/data/portal2";
+const char *rt_ps5_root(void) { return data_root; }
+// rt_ps5_data("user/x") is "<root>/user/x": one string per name, kept for the process (a few dozen names).
+const char *rt_ps5_data(const char *relative) {
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    static struct { const char *relative; char *path; } kept[64];
+    static unsigned count;
+    pthread_mutex_lock(&lock);
+    const char *found = NULL;
+    for (unsigned i = 0; i < count && !found; ++i) if (!strcmp(kept[i].relative, relative)) found = kept[i].path;
+    if (!found && count < 64) {
+        size_t length = strlen(data_root) + 1 + strlen(relative) + 1;
+        char *path = malloc(length);
+        if (path) { snprintf(path, length, "%s/%s", data_root, relative); kept[count].relative = strdup(relative); kept[count++].path = path; found = path; }
+    }
+    pthread_mutex_unlock(&lock);
+    return found ? found : "/data/portal2/missing";
+}
 extern void platform_init(const char *title_name);
 static pthread_t main_thread;
 // Runs before main (priority 101): notification at startup, stderr to a file so failures can be read back.
 __attribute__((constructor(101))) static void remember_main_thread(void) {
     main_thread = pthread_self();
+    if (!access("/app0/game/portal2", F_OK)) data_root = "/app0";
     platform_init("Portal 2");   // the console glue (deps/ps5-doom3/ps5/src/platform.c): klog, the shell's splash, the pad
-    mkdir("/data/portal2/tmp", 0777);
-    mkdir("/data/portal2/user", 0777);
-    mkdir("/data/portal2/user/dxvk-cache", 0777);
-    setenv("DXVK_STATE_CACHE_PATH", "/data/portal2/user/dxvk-cache", 1);   // an empty path makes DXVK throw in create_directories
+    mkdir(rt_ps5_data("tmp"), 0777);
+    mkdir(rt_ps5_data("user"), 0777);
+    mkdir(rt_ps5_data("user/dxvk-cache"), 0777);
+    setenv("DXVK_STATE_CACHE_PATH", rt_ps5_data("user/dxvk-cache"), 1);   // an empty path makes DXVK throw in create_directories
     // RADV's compiled-shader cache: a title has no HOME, so without a directory every pipeline is recompiled on each run (the
     // stutter when a new material or effect first appears). Warm runs then only pay DXVK's own work.
-    mkdir("/data/portal2/user/mesa-cache", 0777);
-    setenv("MESA_SHADER_CACHE_DIR", "/data/portal2/user/mesa-cache", 0);
+    mkdir(rt_ps5_data("user/mesa-cache"), 0777);
+    setenv("MESA_SHADER_CACHE_DIR", rt_ps5_data("user/mesa-cache"), 0);
     setenv("MESA_SHADER_CACHE_MAX_SIZE", "2G", 0);
-    setenv("TMPDIR", "/data/portal2/tmp", 1);   // /tmp is not writable on the console; the emulated /proc files are built here
-    if (!freopen("/data/portal2/log.txt", "a", stderr)) rt_ps5_notify("portal2: cannot open /data/portal2/log.txt");
+    setenv("TMPDIR", rt_ps5_data("tmp"), 1);   // /tmp is not writable on the console; the emulated /proc files are built here
+    if (!freopen(rt_ps5_data("log.txt"), "a", stderr)) rt_ps5_notify("portal2: cannot open the log file");
     setvbuf(stderr, NULL, _IONBF, 0);
     dup2(fileno(stderr), 1);   // stdout into the same file, unbuffered: it is lost when the process dies otherwise
     setvbuf(stdout, NULL, _IONBF, 0);
     // Save folders made 0744 by earlier builds (runtime/posix.c now makes them 0777): only this process's user may open them up.
     {
-        static const char save_root[] = "/data/portal2/user/portal2/SAVE";
+        const char *save_root = rt_ps5_data("user/portal2/SAVE");
         chmod(save_root, 0777);
         DIR *saves = opendir(save_root);
         for (struct dirent *entry; saves && (entry = readdir(saves));) {
@@ -182,7 +203,7 @@ __attribute__((constructor(101))) static void remember_main_thread(void) {
     // A write to the log file can take tens of milliseconds on the console, and some writers hold locks while they print: RADV's
     // 10 s submission statistics are printed under the GPU submit lock (a ~90 ms hitch every 10 s). Standard output and error
     // become a pipe drained into the file by a thread of their own; a writer only waits when 64 KiB are pending.
-    log_file = open("/data/portal2/log.txt", O_WRONLY | O_APPEND);   // dup() is refused in a title, like pipe()
+    log_file = open(rt_ps5_data("log.txt"), O_WRONLY | O_APPEND);   // dup() is refused in a title, like pipe()
     pthread_t drain;
     if (log_file >= 0 && !pthread_create(&drain, NULL, log_drain, NULL)) {
         pthread_detach(drain);
@@ -194,14 +215,14 @@ __attribute__((constructor(101))) static void remember_main_thread(void) {
         rt_ps5_trace(note);
     }
 }
-// Progress trace independent of stdio: klog and /data/portal2/trace.txt (one write() per line, appended).
+// Progress trace independent of stdio: klog and trace.txt in the data folder (one write() per line, appended).
 extern int sceKernelDebugOutText(int channel, const char *text);
 void rt_ps5_trace(const char *text) {
     char line_[1400];
     int length = snprintf(line_, sizeof line_, "[p2] %s\n", text);
     if (length > (int)sizeof line_ - 1) { length = (int)sizeof line_ - 1; line_[length - 1] = '\n'; }
     sceKernelDebugOutText(0, line_);
-    int fd = open("/data/portal2/trace.txt", O_WRONLY | O_CREAT | O_APPEND, 0666);
+    int fd = open(rt_ps5_data("trace.txt"), O_WRONLY | O_CREAT | O_APPEND, 0666);
     if (fd >= 0) { if (length > 0) (void)!write(fd, line_, (size_t)length); close(fd); }
 }
 pthread_t rt_ps5_main_thread(void) { return main_thread; }

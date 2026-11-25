@@ -2,6 +2,7 @@
 // The libraries linked in (fontconfig, freetype, SDL) reference them; these are small stand-ins for the C locale and the
 // console's file system (a title's temporary files live in /data/portal2/tmp).
 #ifdef __PROSPERO__
+const char *rt_ps5_data(const char *relative);
 #include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -54,7 +55,8 @@ char *mkdtemp(char *pattern) {
 }
 
 FILE *tmpfile(void) {
-    char name[] = "/data/portal2/tmp/tmpfileXXXXXX";
+    char name[512];
+    snprintf(name, sizeof name, "%s", rt_ps5_data("tmp/tmpfileXXXXXX"));
     int fd = mkstemp(name);
     if (fd < 0) return NULL;
     unlink(name);
@@ -225,7 +227,7 @@ static void frame_cap_poll(void) {
     if (!wsi_videoout_set_flip_rate || !wsi_videoout_refresh_millihertz) return;
     int refresh = wsi_videoout_refresh_millihertz();
     if (!refresh) return;
-    int wanted = !access("/data/portal2/fps60", F_OK) && refresh > 100000 ? 1 : 0;
+    int wanted = !access(rt_ps5_data("fps60"), F_OK) && refresh > 100000 ? 1 : 0;
     if (wanted == applied) return;
     int result = wsi_videoout_set_flip_rate(wanted);
     char note[120];
@@ -246,22 +248,22 @@ static void *watchdog(void *unused) {
         frame_cap_poll();
         // /data/portal2/profile.request (tools/ps5/run_title.sh --profile): the main thread's instruction address every 5 ms for
         // 10 s, one address (and the word on top of the stack) a line in /data/portal2/profile.txt.
-        if (!access("/data/portal2/profile.request", F_OK)) {
+        if (!access(rt_ps5_data("profile.request"), F_OK)) {
             char what[16] = {0};
-            FILE *request = fopen("/data/portal2/profile.request", "r");
+            FILE *request = fopen(rt_ps5_data("profile.request"), "r");
             if (request) { if (!fgets(what, sizeof what, request)) what[0] = 0; fclose(request); }
-            unlink("/data/portal2/profile.request");
+            unlink(rt_ps5_data("profile.request"));
             pthread_t target = title_main_thread;
             profile_next = 0;
             for (int i = 0; i < PROFILE_SAMPLES; ++i) { pthread_kill(target, SIGPROF); usleep(5000); }
             usleep(20000);
             unsigned taken = profile_next < PROFILE_SAMPLES ? profile_next : PROFILE_SAMPLES;
-            FILE *out = fopen("/data/portal2/profile.tmp", "w");
+            FILE *out = fopen(rt_ps5_data("profile.tmp"), "w");
             if (out) {
                 fprintf(out, "profile: main thread, main at %p, %u samples\n", (void *)main, taken);
                 for (unsigned i = 0; i < taken; ++i) fprintf(out, "%lx %lx\n", (unsigned long)profile_pcs[i], (unsigned long)profile_tops[i]);
                 fclose(out);
-                rename("/data/portal2/profile.tmp", "/data/portal2/profile.txt");
+                rename(rt_ps5_data("profile.tmp"), rt_ps5_data("profile.txt"));
             }
             continue;
         }
@@ -278,15 +280,15 @@ __attribute__((constructor(102))) static void install_crash_log(void) {
 #ifdef RT_PGO_GENERATE
     // Profile-guided optimization run on the console (tools/build_game.py --pgo-generate, PS5_PGO_GENERATE=1 for the link):
     // runtime/profile.c writes the counts here every 20 s; a title never exits through exit().
-    setenv("LLVM_PROFILE_FILE", "/data/portal2/tmp/portal2-ps5.profraw", 0);
+    setenv("LLVM_PROFILE_FILE", rt_ps5_data("tmp/portal2-ps5.profraw"), 0);
 #endif
     // DXVK's Logger is a static object: these are read before main runs.
     setenv("DXVK_LOG_LEVEL", "warn", 0);   // "debug" writes a line per compiled shader: a hitch of its own
-    setenv("DXVK_LOG_PATH", "/data/portal2/tmp", 0);
+    setenv("DXVK_LOG_PATH", rt_ps5_data("tmp"), 0);
     // No system fonts: tools/ps5/fonts.conf (the game's own fonts and the family aliases VGUI uses).
-    if (!access("/data/portal2/fonts.conf", R_OK)) setenv("FONTCONFIG_FILE", "/data/portal2/fonts.conf", 0);
+    if (!access(rt_ps5_data("fonts.conf"), R_OK)) setenv("FONTCONFIG_FILE", rt_ps5_data("fonts.conf"), 0);
     // Frame counter (runtime/fps_overlay.c, top left) while /data/portal2/show_fps exists.
-    if (!access("/data/portal2/show_fps", F_OK)) setenv("P2_FPS", "1", 0);
+    if (!access(rt_ps5_data("show_fps"), F_OK)) setenv("P2_FPS", "1", 0);
     static const int fatal[] = {SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE};
     struct sigaction fatal_action = {0};
     fatal_action.sa_sigaction = fatal_signal;

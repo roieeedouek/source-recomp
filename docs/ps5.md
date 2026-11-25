@@ -58,13 +58,21 @@ build is over 1 GB and does not run.)
 them from. Artwork made from the game's screenshots is Valve's: keep it out of the repository (`build/`
 is ignored).
 
+## Where the game finds its files
+
+The data folder is the title's own (`/data/homebrew/PPSA97622`, `/app0` inside the title) when it holds
+`game/portal2`, else `/data/portal2` (`runtime/ps5.c`, `rt_ps5_data`). It holds `game/` (Portal 2's
+files), `prep/` (`tools/gameprep.py`'s output), `user/` (saves, settings, shader caches), `fonts.conf`,
+the option files and the logs. `tools/ps5/package_title.py --self-contained` builds a title folder that
+has everything (for yourself: it contains the game).
+
 ## Run and diagnose
 
 `PS5_HOST=<console> tools/ps5/run_title.sh` uploads the title over FTP, stops a running instance
 (`tools/ps5/killapp.c`, sent to the ELF loader: the shell's `kill` does not reach an app), launches it
 through the shell server and prints its log. On the console:
 
-| Path under `/data/portal2` | Use |
+| Path in the data folder | Use |
 |---|---|
 | `log.txt` | standard error (written by a thread of its own: a slow write held RADV's submit lock) |
 | `trace.txt` | startup steps, frame pacing every 10 s, slow Vulkan calls, stall backtraces |

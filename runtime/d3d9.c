@@ -1126,6 +1126,7 @@ void d3d9_manual_IDirect3DDevice9_SetGammaRamp(CPU *c, void *self, uint32_t a) {
 // and written, scaled down to 960 pixels wide, as /data/portal2/screen.bmp (readable over FTP); the present count goes to the
 // trace (rt_ps5_trace). D3D9 calls only, on the device the game presents with.
 void rt_ps5_trace(const char *text);
+const char *rt_ps5_data(const char *relative);
 uint64_t rt_d3d9_presents(void);
 typedef struct { uint32_t Format, Type, Usage, Pool, MultiSampleType, MultiSampleQuality, Width, Height; } HostSurfaceDesc;
 typedef struct { int32_t Pitch; void *pBits; } HostLockedRect;
@@ -1136,13 +1137,13 @@ static void ps5_screenshot(void *device) {
     time_t now = time(NULL);
     if (now == last_check) return;
     last_check = now;
-    if (access("/data/portal2/screenshot.request", F_OK)) return;
+    if (access(rt_ps5_data("screenshot.request"), F_OK)) return;
     // A request file that says "full" asks for the whole frame (3840x2160, ~25 MB), for title artwork.
     char what[8] = {0};
-    FILE *request = fopen("/data/portal2/screenshot.request", "r");
+    FILE *request = fopen(rt_ps5_data("screenshot.request"), "r");
     if (request) { if (!fgets(what, sizeof what, request)) what[0] = 0; fclose(request); }
     int full = !strncmp(what, "full", 4);
-    unlink("/data/portal2/screenshot.request");
+    unlink(rt_ps5_data("screenshot.request"));
     void **vt = (void **)D3D9_VTBL(device), *back = NULL, *copy = NULL;
     char note[200];
     int32_t hr = ((int32_t (*)(void *, uint32_t, uint32_t, uint32_t, void **))vt[D3D9_SLOT_IDirect3DDevice9_GetBackBuffer])(device, 0, 0, 0, &back);
@@ -1169,9 +1170,9 @@ static void ps5_screenshot(void *device) {
                 uint8_t *dst = image + 54 + (size_t)(h - 1 - y) * row;
                 for (uint32_t x = 0; x < w; ++x) memcpy(dst + x * 3, src + (size_t)x * step * 4, 3);
             }
-            FILE *out = fopen("/data/portal2/screen.tmp", "wb");
+            FILE *out = fopen(rt_ps5_data("screen.tmp"), "wb");
             int written = out ? (int)fwrite(image, 1, size, out) : -errno;
-            if (out) { fclose(out); if (rename("/data/portal2/screen.tmp", "/data/portal2/screen.bmp")) written = -errno; }
+            if (out) { fclose(out); if (rename(rt_ps5_data("screen.tmp"), rt_ps5_data("screen.bmp"))) written = -errno; }
             snprintf(note, sizeof note, "screenshot: wrote %d of %u bytes (%ux%u)", written, size, w, h);
             rt_ps5_trace(note);
             free(image);

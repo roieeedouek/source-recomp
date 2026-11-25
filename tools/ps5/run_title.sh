@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Uploads the built title, launches it through the console's shell server and prints its log.
 #   PS5_HOST=<console address> tools/ps5/run_title.sh [--no-upload] [--wait SECONDS] [TITLE_ID]
-#   tools/ps5/run_title.sh --shot OUT.png      screenshot of the running game (it writes /data/portal2/screen.bmp on request)
+#   tools/ps5/run_title.sh --shot OUT.png      screenshot of the running game (it writes $data/screen.bmp on request)
 #   tools/ps5/run_title.sh --shot-full OUT.png the whole 3840x2160 frame (for title artwork, tools/ps5/make_title_art.py)
 #   tools/ps5/run_title.sh --profile main   10 s of instruction-address samples of the running game, symbolized (tools/ps5/profile_report.py)
-# Needs on the console: an FTP server (port 2120 or 2121: probed), shsrv on 2323. The game writes /data/portal2/log.txt; this prints
+# Needs on the console: an FTP server (port 2120 or 2121: probed), shsrv on 2323. The game writes $data/log.txt; this prints
 # it from the last "=== portal2 title starts" marker. Ends when the log shows an exit or a fatal signal, or after the wait.
 set -euo pipefail
 host=${PS5_HOST:?set PS5_HOST to the console address}
@@ -21,15 +21,24 @@ ftp_port=""
 for port in 2120 2121; do open_port $port && { ftp_port=$port; break; }; done
 [[ -n $ftp_port ]] || { echo "no FTP server on $host (2120, 2121)" >&2; exit 1; }
 open_port 2323 || { echo "no shsrv on $host:2323" >&2; exit 1; }
+# The game's data folder: the title's own when it holds the game (game/portal2), else /data/portal2 (runtime/ps5.c).
+data=${PS5_DATA:-}
+if [[ -z $data ]]; then
+    if curl -s --disable-epsv --max-time 10 "ftp://$host:$ftp_port/data/homebrew/$title/game/" 2>/dev/null | grep " portal2\s*$" > /dev/null; then
+        data=/data/homebrew/$title
+    else
+        data=/data/portal2
+    fi
+fi
 shell() { printf '%s\nexit\n' "$1" | timeout 20 nc -w 10 "$host" 2323 2>&1 | tr -d '\000' | sed 's/\x1b\[[0-9;]*m//g'; }
-log() { curl -s --disable-epsv --max-time 30 "ftp://$host:$ftp_port/data/portal2/log.txt" | tr -d '\000'; }
+log() { { curl -s --disable-epsv --max-time 30 "ftp://$host:$ftp_port$data/log.txt" || true; } | tr -d '\000'; }   # none yet: empty
 if [[ -n $profile ]]; then
-    curl -s --disable-epsv --max-time 10 -Q "DELE /data/portal2/profile.txt" "ftp://$host:$ftp_port/" > /dev/null 2>&1 || true
-    printf '%s\n' "$profile" | curl -sS --disable-epsv --max-time 15 -T - "ftp://$host:$ftp_port/data/portal2/profile.request"
+    curl -s --disable-epsv --max-time 10 -Q "DELE $data/profile.txt" "ftp://$host:$ftp_port/" > /dev/null 2>&1 || true
+    printf '%s\n' "$profile" | curl -sS --disable-epsv --max-time 15 -T - "ftp://$host:$ftp_port$data/profile.request"
     sleep 14
     raw=$(mktemp)
     for ((t = 0; t < 20; t++)); do
-        curl -s --disable-epsv --max-time 30 "ftp://$host:$ftp_port/data/portal2/profile.txt" -o "$raw" && [[ -s $raw ]] && break
+        curl -s --disable-epsv --max-time 30 "ftp://$host:$ftp_port$data/profile.txt" -o "$raw" && [[ -s $raw ]] && break
         sleep 2
     done
     python3 -I "$here/profile_report.py" "$raw" "$here/../../build/ps5-title-game/llvm-pie-deployed.elf"
@@ -37,15 +46,15 @@ if [[ -n $profile ]]; then
     exit 0
 fi
 if [[ -n $shot ]]; then
-    printf '%s\n' "$shot_size" | curl -sS --disable-epsv --max-time 15 -T - "ftp://$host:$ftp_port/data/portal2/screenshot.request"
+    printf '%s\n' "$shot_size" | curl -sS --disable-epsv --max-time 15 -T - "ftp://$host:$ftp_port$data/screenshot.request"
     for ((t = 0; t < 15; t++)); do
         sleep 1
-        curl -s --disable-epsv --max-time 10 "ftp://$host:$ftp_port/data/portal2/" | grep "screenshot.request" > /dev/null || break
+        curl -s --disable-epsv --max-time 10 "ftp://$host:$ftp_port$data/" | grep "screenshot.request" > /dev/null || break
     done
     sleep 1
     bmp=$(mktemp --suffix=.bmp)
     sleep 2
-    curl -sS --disable-epsv --max-time 120 "ftp://$host:$ftp_port/data/portal2/screen.bmp" -o "$bmp"
+    curl -sS --disable-epsv --max-time 120 "ftp://$host:$ftp_port$data/screen.bmp" -o "$bmp"
     python3 -I -c 'import sys; from PIL import Image; Image.open(sys.argv[1]).save(sys.argv[2])' "$bmp" "$shot"
     rm -f "$bmp"
     echo "screenshot: $shot"
@@ -68,7 +77,7 @@ if ((upload)); then
     shell "chmod 755 /data/homebrew/$title/eboot.bin" > /dev/null
     echo "uploaded $(stat -c %s "$folder/eboot.bin") bytes"
     cp "$folder/../link/llvm-pie.elf" "$folder/../llvm-pie-deployed.elf"   # symbols of what runs, for --profile
-    curl -sS --disable-epsv --max-time 30 -T "$here/fonts.conf" "ftp://$host:$ftp_port/data/portal2/fonts.conf"
+    curl -sS --disable-epsv --max-time 30 -T "$here/fonts.conf" "ftp://$host:$ftp_port$data/fonts.conf"
 fi
 before=$(log | wc -l)
 shell "launch $title" | grep -v -E "^(Welcome|Model|S/N|S/W|SoC|CPU|Type|$)" | tail -2 || true

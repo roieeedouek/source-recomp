@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Frame-rate benchmark of a title build on the console, from a save: installs EBOOT (or the built one), loads SAVE through
-# /data/portal2/args.txt, lets loading settle and averages the frame statistics the title writes to trace.txt every 10 s.
+# args.txt in the data folder, lets loading settle and averages the frame statistics the title writes to trace.txt every 10 s.
 #   PS5_HOST=<console> tools/ps5/bench_title.sh SAVE [EBOOT] [--settle SECONDS] [--measure SECONDS]
 # Prints the 10 s windows measured and their mean frame rate. The game is left running.
 set -euo pipefail
@@ -14,7 +14,16 @@ while (($#)); do
     shift
 done
 ftp=ftp://$host:2120
-printf '+load %s\n' "$save" | curl -sS --disable-epsv --max-time 15 -T - "$ftp/data/portal2/args.txt"
+# The game's data folder: the title's own when it holds the game (game/portal2), else /data/portal2 (runtime/ps5.c).
+data=${PS5_DATA:-}
+if [[ -z $data ]]; then
+    if curl -s --disable-epsv --max-time 10 "$ftp/data/homebrew/PPSA97622/game/" 2>/dev/null | grep " portal2\s*$" > /dev/null; then
+        data=/data/homebrew/PPSA97622
+    else
+        data=/data/portal2
+    fi
+fi
+printf '+load %s\n' "$save" | curl -sS --disable-epsv --max-time 15 -T - "$ftp$data/args.txt"
 shell() { printf '%s\nexit\n' "$1" | timeout 20 nc -w 10 "$host" 2323 2>&1 | tr -d '\000' | sed 's/\x1b\[[0-9;]*m//g'; }
 # A running instance holds eboot.bin: stopped first (the shell's kill does not reach an app: killapp.c through the ELF loader).
 app=$(shell ps | awk '/PPSA97622/ && /eboot\.bin/ && !found {print $7; found = 1}')
@@ -33,10 +42,10 @@ if [[ -n $eboot ]]; then
 else
     upload=""
 fi
-curl -s --disable-epsv --max-time 10 -Q "DELE /data/portal2/trace.txt" "$ftp/" > /dev/null 2>&1 || true
+curl -s --disable-epsv --max-time 10 -Q "DELE $data/trace.txt" "$ftp/" > /dev/null 2>&1 || true
 "$here/run_title.sh" $upload --wait 5 > /dev/null 2>&1 || true
 sleep "$settle"
-before=$(curl -s --disable-epsv --max-time 20 "$ftp/data/portal2/trace.txt" | tr -d '\000' | grep -c "frames:" || true)
+before=$(curl -s --disable-epsv --max-time 20 "$ftp$data/trace.txt" | tr -d '\000' | grep -c "frames:" || true)
 sleep "$measure"
-curl -s --disable-epsv --max-time 20 "$ftp/data/portal2/trace.txt" | tr -d '\000' | grep "frames:" | tail -n +$((before + 1)) |
+curl -s --disable-epsv --max-time 20 "$ftp$data/trace.txt" | tr -d '\000' | grep "frames:" | tail -n +$((before + 1)) |
     awk '{print; frames += $3; seconds += 10} END {if (seconds) printf "mean: %.1f fps over %d s\n", frames / seconds, seconds; else print "no frames measured"}'

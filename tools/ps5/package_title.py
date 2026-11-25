@@ -2,7 +2,12 @@
 """Packages the built PS5 title for installing on a console, without any game files.
 
     python3 tools/ps5/package_title.py [--title-dir build/ps5-title-game/PPSA97622] [--out build/ps5-release]
-                                       [--with-art] [--no-fps60]
+                                       [--with-art] [--no-fps60] [--self-contained]
+
+--self-contained (a package for yourself) puts everything in the title folder instead, ready to copy to
+/data/homebrew/PPSA97622: the title, your Portal 2 (game/, hard-linked from your copy), its prepared libraries (prep/),
+fonts.conf, fps60, show_fps and the artwork. The game then finds its files in its own folder (runtime/ps5.c). It writes
+build/ps5-release/portal2-ps5-<version>-self-contained/{PPSA97622, INSTALL.txt}, without a zip (about 12 GB).
 
 Writes build/ps5-release/portal2-ps5-<version>/ and a .zip of it:
 
@@ -21,6 +26,7 @@ for yourself, do not publish it.
 """
 import argparse
 import hashlib
+import os
 import json
 import shutil
 import subprocess
@@ -82,6 +88,46 @@ This package contains code translated from Portal 2's own binaries: keep it for 
 '''
 
 
+INSTALL_SELF = '''Portal 2 for your PS5 (source-recomp), self-contained package {version}
+======================================================================
+
+Everything is in the folder PPSA97622: the game, its prepared libraries, saves and settings once you
+play. For your own console only: it contains Portal 2.
+
+New install
+1. Copy the folder PPSA97622 to /data/homebrew/ on the console with your FTP client (about 12 GB).
+2. Make it runnable: chmod 755 /data/homebrew/PPSA97622/eboot.bin (FTP client or the shell server).
+3. Register it with your homebrew launcher (ShadowMountPlus) and start "Portal 2 (source-recomp)".
+
+Already playing from /data/portal2?
+Keep your saves and skip the big upload: copy only the small files of PPSA97622 (eboot.bin, sce_sys,
+sce_module, fonts.conf, fps60, show_fps) to /data/homebrew/PPSA97622, then move the rest across on the
+console (the shell server, port 2323; moving within /data is instant):
+    mv /data/portal2/game /data/homebrew/PPSA97622/game
+    mv /data/portal2/prep /data/homebrew/PPSA97622/prep
+    mv /data/portal2/user /data/homebrew/PPSA97622/user
+The game uses its own folder as soon as PPSA97622/game/portal2 exists.
+
+Options (files in /data/homebrew/PPSA97622)
+    fps60       60 fps lock, paced by the display (delete it for up to 120 Hz)
+    show_fps    frame counter, top left (delete it to hide)
+    args.txt    extra game arguments, e.g. +load <save name>
+The log is log.txt in the same folder.
+'''
+
+
+def link_tree(source, target):
+    """Copies a folder with hard links (no extra space) where the file system allows it."""
+    for directory, _, files in os.walk(source):
+        destination = Path(target) / Path(directory).relative_to(source)
+        destination.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            try:
+                os.link(Path(directory) / name, destination / name)
+            except OSError:
+                shutil.copy2(Path(directory) / name, destination / name)
+
+
 def text_icon(path):
     """A plain 512x512 icon: the title's name on dark blue, no game artwork."""
     image = Image.new('RGB', (512, 512), (18, 40, 78))
@@ -109,6 +155,8 @@ def main():
     parser.add_argument('--out', type=Path, default=ROOT / 'build/ps5-release')
     parser.add_argument('--with-art', action='store_true', help='include build/ps5-art (made from screenshots: personal use)')
     parser.add_argument('--no-fps60', action='store_true', help='leave out the 60 fps lock file')
+    parser.add_argument('--self-contained', action='store_true',
+                        help='a package for yourself: the game and its prepared libraries inside the title folder')
     args = parser.parse_args()
 
     title = args.title_dir
@@ -117,6 +165,8 @@ def main():
             parser.exit(1, f'{title / needed} missing: build the title first (tools/ps5/build_title.sh)\n')
     plan = json.loads((args.prep / 'plan.json').read_text())
 
+    if args.self_contained:
+        return self_contained(args, title, plan)
     name = f'portal2-ps5-{version()}'
     package = args.out / name
     if package.exists():
@@ -156,6 +206,36 @@ def main():
     size = Path(archive).stat().st_size
     print(f'{package}\n{archive} ({size / 2**20:.0f} MiB): title {(target / "eboot.bin").stat().st_size / 2**20:.0f} MiB, '
           f'{len(files)} game binaries fingerprinted, icon {"from build/ps5-art" if args.with_art else "plain text"}')
+
+
+def self_contained(args, title, plan):
+    first = Path(plan[0]['path'])
+    game_root = next(parent for parent in first.parents if (parent / 'portal2').is_dir() and (parent / 'bin').is_dir())
+    package = args.out / f'portal2-ps5-{version()}-self-contained'
+    if package.exists():
+        shutil.rmtree(package)
+    target = package / title.name
+    (target / 'sce_sys').mkdir(parents=True)
+    (target / 'sce_module').mkdir()
+    shutil.copy2(title / 'eboot.bin', target / 'eboot.bin')
+    shutil.copy2(title / 'sce_sys/param.json', target / 'sce_sys/param.json')
+    shutil.copy2(title / 'sce_module/libc.prx', target / 'sce_module/libc.prx')
+    art = ROOT / 'build/ps5-art'
+    if (art / 'icon0.png').is_file():
+        for file in ('icon0.png', 'pic0.dds', 'pic1.dds'):
+            if (art / file).is_file():
+                shutil.copy2(art / file, target / 'sce_sys' / file)
+    else:
+        text_icon(target / 'sce_sys/icon0.png')
+    shutil.copy2(ROOT / 'tools/ps5/fonts.conf', target / 'fonts.conf')
+    if not args.no_fps60:
+        (target / 'fps60').write_bytes(b'')
+    (target / 'show_fps').write_bytes(b'')
+    shutil.copytree(args.prep, target / 'prep')
+    link_tree(game_root, target / 'game')
+    (package / 'INSTALL.txt').write_text(INSTALL_SELF.format(version=version()))
+    size = sum(f.stat().st_size for f in target.rglob('*') if f.is_file())
+    print(f'{package}: {size / 2**30:.1f} GiB (game from {game_root}, prep from {args.prep}); copy {title.name} to /data/homebrew')
 
 
 if __name__ == '__main__':
